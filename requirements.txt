@@ -8,3 +8,4 @@ easydict
 torchvision
 flash-attn==2.7.3
 PyMuPDF
+hf_transfer
