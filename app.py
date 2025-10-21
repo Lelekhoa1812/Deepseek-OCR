@@ -238,7 +238,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
                     md_out = gr.Markdown("")
                 with gr.Tab("🖼️ Boxes"):
                     img_out = gr.Image(type="pil", height=500, show_label=False)
-                with gr.Tab("🖼️ Figures"):
+                with gr.Tab("🖼️ Cropped Images"):
                     gallery = gr.Gallery(show_label=False, columns=3, height=400)
                 with gr.Tab("🔍 Raw"):
                     raw_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
