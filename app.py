@@ -17,8 +17,8 @@ from io import StringIO, BytesIO
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-model = AutoModel.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="auto")
-model = model.eval()
+model = AutoModel.from_pretrained(MODEL_NAME, _attn_implementation='flash_attention_2', torch_dtype=torch.bfloat16, trust_remote_code=True, use_safetensors=True)
+model = model.eval().cuda()
 
 MODEL_CONFIGS = {
     "⚡ Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
