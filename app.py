@@ -223,7 +223,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
     # 🚀 DeepSeek-OCR
     **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes**
     
-    *Hope this tool was helpful! If so, a quick ❤️ and share would mean a lot :)*
+    *Hope this tool was helpful! If so, a quick like ❤️ would mean a lot :)*
     """)
     
     with gr.Row():
