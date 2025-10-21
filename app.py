@@ -245,8 +245,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
     
     gr.Examples(
         examples=[
-            ["ocr.jpg", "⚡ Gundam", "📋 Markdown", ""],
-            ["reachy-mini.jpg", "⚡ Gundam", "📍 Locate", "Robot"]
+            ["examples/ocr.jpg", "⚡ Gundam", "📋 Markdown", ""],
+            ["examples/reachy-mini.jpg", "⚡ Gundam", "📍 Locate", "Robot"]
         ],
         inputs=[file_in, mode, task, prompt],
         cache_examples=False
