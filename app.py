@@ -220,7 +220,7 @@ def load_image(file_path):
 
 with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
     gr.Markdown("""
-    # 🚀 DeepSeek-OCR
+    # 🚀 DeepSeek-OCR Demo
     **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes. Check the info at the bottom of the page for more information.**
     
     **Hope this tool was helpful! If so, a quick like ❤️ would mean a lot :)**
