@@ -253,7 +253,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
             ["examples/ocr.jpg", "⚡ Gundam", "📋 Markdown", ""],
             ["examples/reachy-mini.jpg", "⚡ Gundam", "📍 Locate", "Robot"]
         ],
-        inputs=[file_in, mode, task, prompt],
+        inputs=[input_img, mode, task, prompt],
         cache_examples=False
     )
     
@@ -276,7 +276,16 @@ with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
     
     file_in.change(load_image, [file_in], [input_img])
     task.change(toggle_prompt, [task], [prompt])
-    btn.click(process_file, [file_in, mode, task, prompt], [text_out, md_out, raw_out, img_out, gallery])
+    
+    def run(image, file_path, mode, task, custom_prompt):
+        if image is not None:
+            return process_image(image, mode, task, custom_prompt)
+        if file_path:
+            return process_file(file_path, mode, task, custom_prompt)
+        return "Error uploading file or image", "", "", None, []
+
+    btn.click(run, [input_img, file_in, mode, task, prompt],
+              [text_out, md_out, raw_out, img_out, gallery])
 
 if __name__ == "__main__":
     demo.queue(max_size=20).launch()
