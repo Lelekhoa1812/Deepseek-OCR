@@ -1,8 +1,8 @@
 ---
 title: DeepSeek OCR Demo
 emoji: 🚀
-colorFrom: yellow
-colorTo: green
+colorFrom: red
+colorTo: red
 sdk: gradio
 sdk_version: 5.49.1
 app_file: app.py
