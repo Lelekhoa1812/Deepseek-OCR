@@ -425,8 +425,13 @@ def build_blocks(theme):
         
         with gr.Row():
             with gr.Column(scale=1):
+                # Uploader container
                 file_in = gr.File(label="Upload Image or PDF", file_types=["image", ".pdf"], type="filepath")
                 input_img = gr.Image(label="Input Image", type="pil", height=300)
+                # PDF preview page selector container (visible only for PDFs)
+                page_seps = gr.Checkbox(value=True, label="Insert page separators (---)")
+                page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
+                # Processing options container
                 mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode")
                 task = gr.Dropdown(list(TASK_LABEL_TO_KEY.keys()), value="Markdown", label="Task")
                 prompt = gr.Textbox(label="Prompt", lines=2, visible=False)
@@ -435,12 +440,9 @@ def build_blocks(theme):
                     high_acc = gr.Checkbox(value=False, label="High accuracy (slower)")
                 with gr.Row():
                     dpi = gr.Slider(150, 600, value=300, step=50, label="PDF DPI")
-                    page_range = gr.Textbox(label="Page range (e.g. 1-3,5)", placeholder="All pages")
-                page_seps = gr.Checkbox(value=True, label="Insert page separators (---)")
-                # PDF preview page selector (visible only for PDFs)
-                page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
+                    page_range = gr.Textbox(label="Page range (e.g. 1-3,5)", placeholder="All pages")            
                 btn = gr.Button("Extract", variant="primary", size="lg")
-            
+            # Second row container
             with gr.Column(scale=2):
                 with gr.Tabs():
                     with gr.Tab("Text"):
