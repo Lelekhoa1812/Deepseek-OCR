@@ -21,6 +21,21 @@ import zipfile
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+# Ensure pad token and padding side to avoid attention mask warnings
+try:
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+            # Resize embeddings if special token was newly added
+            try:
+                model.resize_token_embeddings(len(tokenizer))
+            except Exception:
+                pass
+    tokenizer.padding_side = 'right'
+except Exception:
+    pass
  
 def ensure_flash_attn_if_cuda():
     # Only attempt install when CUDA is available
@@ -380,6 +395,27 @@ def load_image(file_path):
     else:
         return Image.open(file_path)
 
+def get_pdf_page_count(file_path):
+    try:
+        doc = fitz.open(file_path)
+        n = len(doc)
+        doc.close()
+        return n
+    except Exception:
+        return 1
+
+def render_pdf_page(file_path, page_number, dpi_value):
+    try:
+        doc = fitz.open(file_path)
+        idx = max(1, min(page_number, len(doc))) - 1
+        page = doc.load_page(idx)
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi_value/72, dpi_value/72), alpha=False)
+        img = Image.open(BytesIO(pix.tobytes("png")))
+        doc.close()
+        return img
+    except Exception:
+        return None
+
 def build_blocks(theme):
     with gr.Blocks(theme=theme, title="DeepSeek-OCR") as demo:
         gr.Markdown("""
@@ -401,6 +437,8 @@ def build_blocks(theme):
                     dpi = gr.Slider(150, 600, value=300, step=50, label="PDF DPI")
                     page_range = gr.Textbox(label="Page range (e.g. 1-3,5)", placeholder="All pages")
                 page_seps = gr.Checkbox(value=True, label="Insert page separators (---)")
+                # PDF preview page selector (visible only for PDFs)
+                page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
                 btn = gr.Button("Extract", variant="primary", size="lg")
             
             with gr.Column(scale=2):
@@ -438,7 +476,38 @@ def build_blocks(theme):
             - Custom: Your own prompt (add `<|grounding|>` for boxes)
             """)
         
-        file_in.change(load_image, [file_in], [input_img])
+        # Enhanced preview logic for PDFs: show the selected page and slider
+        def init_preview(file_path, dpi_value):
+            fp = None
+            if isinstance(file_path, str):
+                fp = file_path
+            elif isinstance(file_path, dict):
+                fp = file_path.get('name') or file_path.get('path')
+            if not fp:
+                return None, gr.update(visible=False)
+            if fp.lower().endswith('.pdf'):
+                total = get_pdf_page_count(fp)
+                img = render_pdf_page(fp, 1, int(dpi_value))
+                return img, gr.update(visible=True, minimum=1, maximum=max(1, total), value=1)
+            # Non-PDF
+            try:
+                return Image.open(fp), gr.update(visible=False)
+            except Exception:
+                return None, gr.update(visible=False)
+
+        def update_preview_page(file_path, page_num, dpi_value):
+            fp = None
+            if isinstance(file_path, str):
+                fp = file_path
+            elif isinstance(file_path, dict):
+                fp = file_path.get('name') or file_path.get('path')
+            if fp and fp.lower().endswith('.pdf'):
+                return render_pdf_page(fp, int(page_num), int(dpi_value))
+            return input_img.value
+
+        file_in.change(init_preview, [file_in, dpi], [input_img, page_slider])
+        page_slider.change(update_preview_page, [file_in, page_slider, dpi], [input_img])
+        dpi.release(update_preview_page, [file_in, page_slider, dpi], [input_img])
         task.change(toggle_prompt, [task], [prompt])
         
         def run(image, file_path, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages):
