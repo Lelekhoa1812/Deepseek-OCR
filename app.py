@@ -13,28 +13,91 @@ import warnings
 import numpy as np
 import base64
 from io import StringIO, BytesIO
+import subprocess
+import importlib
+import time
+import zipfile
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-model = AutoModel.from_pretrained(MODEL_NAME, _attn_implementation='flash_attention_2', torch_dtype=torch.bfloat16, trust_remote_code=True, use_safetensors=True)
-model = model.eval().cuda()
+ 
+def ensure_flash_attn_if_cuda():
+    # Only attempt install when CUDA is available
+    if not torch.cuda.is_available():
+        return False
+    try:
+        importlib.import_module('flash_attn')
+        return True
+    except Exception:
+        pass
+    try:
+        # Install without build isolation so setup can import torch
+        subprocess.check_call([
+            sys.executable, '-m', 'pip', 'install', '--no-build-isolation', '--no-cache-dir', 'flash-attn==2.7.3'
+        ])
+        importlib.invalidate_caches()
+        importlib.import_module('flash_attn')
+        return True
+    except Exception:
+        return False
+flash_ok = ensure_flash_attn_if_cuda()
+try:
+    model = AutoModel.from_pretrained(
+        MODEL_NAME,
+        _attn_implementation='flash_attention_2' if flash_ok else None,
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        use_safetensors=True,
+    )
+    if torch.cuda.is_available():
+        model = model.eval().cuda()
+    else:
+        raise RuntimeError("CUDA not available; cannot use flash attention")
+except Exception as e:
+    warnings.warn(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
+    model = AutoModel.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=True,
+        use_safetensors=True,
+    )
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device).eval()
 
 MODEL_CONFIGS = {
-    "⚡ Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
-    "🚀 Tiny": {"base_size": 512, "image_size": 512, "crop_mode": False},
-    "📄 Small": {"base_size": 640, "image_size": 640, "crop_mode": False},
-    "📊 Base": {"base_size": 1024, "image_size": 1024, "crop_mode": False},
-    "🎯 Large": {"base_size": 1280, "image_size": 1280, "crop_mode": False}
+    "Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
+    "Tiny": {"base_size": 512, "image_size": 512, "crop_mode": False},
+    "Small": {"base_size": 640, "image_size": 640, "crop_mode": False},
+    "Base": {"base_size": 1024, "image_size": 1024, "crop_mode": False},
+    "Large": {"base_size": 1280, "image_size": 1280, "crop_mode": False}
 }
 
-TASK_PROMPTS = {
-    "📋 Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to markdown.", "has_grounding": True},
-    "📝 Free OCR": {"prompt": "<image>\nFree OCR.", "has_grounding": False},
-    "📍 Locate": {"prompt": "<image>\nLocate <|ref|>text<|/ref|> in the image.", "has_grounding": True},
-    "🔍 Describe": {"prompt": "<image>\nDescribe this image in detail.", "has_grounding": False},
-    "✏️ Custom": {"prompt": "", "has_grounding": False}
+# UI labels mapped to internal keys (use plain labels to match dropdown values)
+MODE_LABEL_TO_KEY = {
+    "Gundam": "Gundam",
+    "Tiny": "Tiny",
+    "Small": "Small",
+    "Base": "Base",
+    "Large": "Large",
 }
+KEY_TO_MODE_LABEL = {v: k for k, v in MODE_LABEL_TO_KEY.items()}
+
+TASK_PROMPTS = {
+    "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
+    "Tables": {"prompt": "<image>\n<|grounding|>Extract ALL tables only as GitHub Markdown tables. Preserve merged cells as best as possible. Do not include non-table content.", "has_grounding": True},
+    "Locate": {"prompt": "<image>\nLocate <|ref|>text<|/ref|> in the image.", "has_grounding": True},
+    "Describe": {"prompt": "<image>\nDescribe this image in detail.", "has_grounding": False},
+    "Custom": {"prompt": "", "has_grounding": False}
+}
+
+TASK_LABEL_TO_KEY = {
+    "Markdown": "Markdown",
+    "Tables": "Tables",
+    "Locate": "Locate",
+    "Describe": "Describe",
+    "Custom": "Custom",
+}
+KEY_TO_TASK_LABEL = {v: k for k, v in TASK_LABEL_TO_KEY.items()}
 
 def extract_grounding_references(text):
     pattern = r'(<\|ref\|>(.*?)<\|/ref\|><\|det\|>(.*?)<\|/det\|>)'
@@ -106,28 +169,31 @@ def embed_images(markdown, crops):
         markdown = markdown.replace(f'**[Figure {i + 1}]**', f'\n\n![Figure {i + 1}](data:image/png;base64,{b64})\n\n', 1)
     return markdown
 
-@spaces.GPU(duration=60)
-def process_image(image, mode, task, custom_prompt):
+@spaces.GPU(duration=120)
+def process_image(image, mode_label, task_label, custom_prompt, embed_figures=False, high_accuracy=False):
     if image is None:
         return " Error Upload image", "", "", None, []
-    if task in ["✏️ Custom", "📍 Locate"] and not custom_prompt.strip():
+    if task_label in ["Custom", "Locate"] and not custom_prompt.strip():
         return "Enter prompt", "", "", None, []
     
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
     image = ImageOps.exif_transpose(image)
     
-    config = MODEL_CONFIGS[mode]
+    # Normalize labels to internal keys
+    mode_key = MODE_LABEL_TO_KEY.get(mode_label, mode_label)
+    task_key = TASK_LABEL_TO_KEY.get(task_label, task_label)
+    config = MODEL_CONFIGS[mode_key]
     
-    if task == "✏️ Custom":
+    if task_label == "Custom":
         prompt = f"<image>\n{custom_prompt.strip()}"
         has_grounding = '<|grounding|>' in custom_prompt
-    elif task == "📍 Locate":
+    elif task_label == "Locate":
         prompt = f"<image>\nLocate <|ref|>{custom_prompt.strip()}<|/ref|> in the image."
         has_grounding = True
     else:
-        prompt = TASK_PROMPTS[task]["prompt"]
-        has_grounding = TASK_PROMPTS[task]["has_grounding"]
+        prompt = TASK_PROMPTS[task_key]["prompt"]
+        has_grounding = TASK_PROMPTS[task_key]["has_grounding"]
     
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
     image.save(tmp.name, 'JPEG', quality=95)
@@ -161,21 +227,81 @@ def process_image(image, mode, task, custom_prompt):
         if refs:
             img_out, crops = draw_bounding_boxes(image, refs, True)
     
-    markdown = embed_images(markdown, crops)
+    if embed_figures:
+        markdown = embed_images(markdown, crops)
+
+    # Optional second pass for high accuracy (focus on tables refinement)
+    if high_accuracy and task_key in ["Markdown", "Tables"]:
+        refine_prompt = "<image>\nRefine the previous extraction with emphasis on accurate table structure and alignment. Output GitHub Markdown only."
+        tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+        image.save(tmp2.name, 'JPEG', quality=95)
+        tmp2.close()
+        out_dir2 = tempfile.mkdtemp()
+        stdout2 = sys.stdout
+        sys.stdout = StringIO()
+        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
+                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+        sys.stdout = stdout2
+        os.unlink(tmp2.name)
+        shutil.rmtree(out_dir2, ignore_errors=True)
+        if refine_result:
+            refined_md = clean_output(refine_result, embed_figures, True)
+            # Prefer refined markdown if longer (heuristic)
+            if len(refined_md) > len(markdown):
+                markdown = refined_md
     
     return cleaned, markdown, result, img_out, crops
 
-@spaces.GPU(duration=300)
-def process_pdf(path, mode, task, custom_prompt):
+@spaces.GPU(duration=120)
+def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, max_retries=5, retry_backoff_seconds=5):
     doc = fitz.open(path)
     texts, markdowns, raws, all_crops = [], [], [], []
     
-    for i in range(len(doc)):
+    # Parse page range like "1-3,5"
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+
+    target_pages = parse_ranges(page_range_text, len(doc))
+    
+    for i in target_pages:
         page = doc.load_page(i)
-        pix = page.get_pixmap(matrix=fitz.Matrix(300/72, 300/72), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
         img = Image.open(BytesIO(pix.tobytes("png")))
         
-        text, md, raw, _, crops = process_image(img, mode, task, custom_prompt)
+        # Retry loop to handle GPU timeouts/busy states gracefully
+        attempt = 0
+        while True:
+            try:
+                text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
         
         if text and text != "No text":
             texts.append(f"### Page {i + 1}\n\n{text}")
@@ -185,23 +311,24 @@ def process_pdf(path, mode, task, custom_prompt):
     
     doc.close()
     
-    return ("\n\n---\n\n".join(texts) if texts else "No text in PDF",
-            "\n\n---\n\n".join(markdowns) if markdowns else "No text in PDF",
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts) if texts else "No text in PDF",
+            sep.join(markdowns) if markdowns else "No text in PDF",
             "\n\n".join(raws), None, all_crops)
 
-def process_file(path, mode, task, custom_prompt):
+def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True):
     if not path:
         return "Error Upload file", "", "", None, []
     
     if path.lower().endswith('.pdf'):
-        return process_pdf(path, mode, task, custom_prompt)
+        return process_pdf(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
     else:
-        return process_image(Image.open(path), mode, task, custom_prompt)
+        return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
 
-def toggle_prompt(task):
-    if task == "✏️ Custom":
+def toggle_prompt(task_label):
+    if task_label == "Custom":
         return gr.update(visible=True, label="Custom Prompt", placeholder="Add <|grounding|> for boxes")
-    elif task == "📍 Locate":
+    elif task_label == "Locate":
         return gr.update(visible=True, label="Text to Locate", placeholder="Enter text")
     return gr.update(visible=False)
 
@@ -218,74 +345,108 @@ def load_image(file_path):
     else:
         return Image.open(file_path)
 
-with gr.Blocks(theme=gr.themes.Soft(), title="DeepSeek-OCR") as demo:
-    gr.Markdown("""
-    # 🚀 DeepSeek-OCR Demo
-    **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes. Check the info at the bottom of the page for more information.**
-    
-    **Hope this tool was helpful! If so, a quick like ❤️ would mean a lot :)**
-    """)
-    
-    with gr.Row():
-        with gr.Column(scale=1):
-            file_in = gr.File(label="Upload Image or PDF", file_types=["image", ".pdf"], type="filepath")
-            input_img = gr.Image(label="Input Image", type="pil", height=300)
-            mode = gr.Dropdown(list(MODEL_CONFIGS.keys()), value="⚡ Gundam", label="Mode")
-            task = gr.Dropdown(list(TASK_PROMPTS.keys()), value="📋 Markdown", label="Task")
-            prompt = gr.Textbox(label="Prompt", lines=2, visible=False)
-            btn = gr.Button("Extract", variant="primary", size="lg")
-        
-        with gr.Column(scale=2):
-            with gr.Tabs():
-                with gr.Tab("📝 Text"):
-                    text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
-                with gr.Tab("🎨 Markdown"):
-                    md_out = gr.Markdown("")
-                with gr.Tab("🖼️ Boxes"):
-                    img_out = gr.Image(type="pil", height=500, show_label=False)
-                with gr.Tab("🖼️ Cropped Images"):
-                    gallery = gr.Gallery(show_label=False, columns=3, height=400)
-                with gr.Tab("🔍 Raw"):
-                    raw_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
-    
-    gr.Examples(
-        examples=[
-            ["examples/ocr.jpg", "⚡ Gundam", "📋 Markdown", ""],
-            ["examples/reachy-mini.jpg", "⚡ Gundam", "📍 Locate", "Robot"]
-        ],
-        inputs=[input_img, mode, task, prompt],
-        cache_examples=False
-    )
-    
-    with gr.Accordion("ℹ️ Info", open=False):
+def build_blocks(theme):
+    with gr.Blocks(theme=theme, title="DeepSeek-OCR") as demo:
         gr.Markdown("""
-        ### Modes
-        - **Gundam**: 1024 base + 640 tiles with cropping - Best balance
-        - **Tiny**: 512×512, no crop - Fastest
-        - **Small**: 640×640, no crop - Quick
-        - **Base**: 1024×1024, no crop - Standard
-        - **Large**: 1280×1280, no crop - Highest quality
-        
-        ### Tasks
-        - **Markdown**: Convert document to structured markdown (grounding ✅)
-        - **Free OCR**: Simple text extraction
-        - **Locate**: Find specific text in image (grounding ✅)
-        - **Describe**: General image description
-        - **Custom**: Your own prompt (add `<|grounding|>` for boxes)
+        # DeepSeek-OCR WebUI
+        **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes.**
         """)
-    
-    file_in.change(load_image, [file_in], [input_img])
-    task.change(toggle_prompt, [task], [prompt])
-    
-    def run(image, file_path, mode, task, custom_prompt):
-        if image is not None:
-            return process_image(image, mode, task, custom_prompt)
-        if file_path:
-            return process_file(file_path, mode, task, custom_prompt)
-        return "Error uploading file or image", "", "", None, []
+        
+        with gr.Row():
+            with gr.Column(scale=1):
+                file_in = gr.File(label="Upload Image or PDF", file_types=["image", ".pdf"], type="filepath")
+                input_img = gr.Image(label="Input Image", type="pil", height=300)
+                mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode")
+                task = gr.Dropdown(list(TASK_LABEL_TO_KEY.keys()), value="Markdown", label="Task")
+                prompt = gr.Textbox(label="Prompt", lines=2, visible=False)
+                with gr.Row():
+                    embed_fig = gr.Checkbox(value=True, label="Embed figures into Markdown")
+                    high_acc = gr.Checkbox(value=False, label="High accuracy (slower)")
+                with gr.Row():
+                    dpi = gr.Slider(150, 600, value=300, step=50, label="PDF DPI")
+                    page_range = gr.Textbox(label="Page range (e.g. 1-3,5)", placeholder="All pages")
+                page_seps = gr.Checkbox(value=True, label="Insert page separators (---)")
+                btn = gr.Button("Extract", variant="primary", size="lg")
+            
+            with gr.Column(scale=2):
+                with gr.Tabs():
+                    with gr.Tab("📝 Text"):
+                        text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
+                    with gr.Tab("Markdown"):
+                        md_out = gr.Markdown("")
+                    with gr.Tab("Boxes"):
+                        img_out = gr.Image(type="pil", height=500, show_label=False)
+                    with gr.Tab("Cropped Images"):
+                        gallery = gr.Gallery(show_label=False, columns=3, height=400)
+                    with gr.Tab("Raw"):
+                        raw_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
+                with gr.Row():
+                    dl_md = gr.DownloadButton(label="Download Markdown", value=None)
+                    dl_txt = gr.DownloadButton(label="Download Text", value=None)
+                    dl_md_zip = gr.DownloadButton(label="Download Markdown (split pages)", value=None)
+        
+        with gr.Accordion("ℹ️ Info", open=False):
+            gr.Markdown("""
+            ### Modes
+            - ⚡ Gundam: 1024 base + 640 tiles with cropping - Best balance
+            - 🧩 Tiny: 512×512, no crop - Fastest
+            - 📄 Small: 640×640, no crop - Quick
+            - 📚 Base: 1024×1024, no crop - Standard
+            - 🖼️ Large: 1280×1280, no crop - Highest quality
+            
+            ### Tasks
+            - Markdown: Convert document to structured markdown (grounding ✅)
+            - Tables: Extract tables only as Markdown (grounding ✅)
+            - Locate: Find specific text in image (grounding ✅)
+            - Describe: General image description
+            - Custom: Your own prompt (add `<|grounding|>` for boxes)
+            """)
+        
+        file_in.change(load_image, [file_in], [input_img])
+        task.change(toggle_prompt, [task], [prompt])
+        
+        def run(image, file_path, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages):
+            if image is not None:
+                text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
+            elif file_path:
+                text, md, raw, img, crops = process_file(file_path, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
+            else:
+                return "Error uploading file or image", "", "", None, [], None, None, None
 
-    btn.click(run, [input_img, file_in, mode, task, prompt],
-              [text_out, md_out, raw_out, img_out, gallery])
+            # Create temp files for download
+            md_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".md")
+            txt_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
+            with open(md_tmp.name, 'w', encoding='utf-8') as f:
+                f.write(md or "")
+            with open(txt_tmp.name, 'w', encoding='utf-8') as f:
+                f.write(text or "")
+            # Optional ZIP split by '---' separators
+            zip_path = None
+            try:
+                if md:
+                    # Split on standalone '---' separator variants
+                    parts = re.split(r"\n\s*---\s*\n", md)
+                    if len(parts) > 1:
+                        zip_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+                        with zipfile.ZipFile(zip_tmp.name, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            for idx, part in enumerate(parts, start=1):
+                                fname = f"page_{idx:03d}.md"
+                                zf.writestr(fname, part.strip() + "\n")
+                        zip_path = zip_tmp.name
+            except Exception:
+                zip_path = None
+            return text, md, raw, img, crops, md_tmp.name, txt_tmp.name, zip_path
+        
+        btn.click(run, [input_img, file_in, mode, task, prompt, dpi, page_range, embed_fig, high_acc, page_seps],
+                  [text_out, md_out, raw_out, img_out, gallery, dl_md, dl_txt, dl_md_zip])
+        
+        return demo
+
+# Build two themed experiences as a light/dark separator without custom CSS/JS
+light_demo = build_blocks(gr.themes.Soft())
+dark_demo = build_blocks(gr.themes.Monochrome())
+
+app = gr.TabbedInterface([light_demo, dark_demo], ["🌞 Light", "🌙 Dark"]) 
 
 if __name__ == "__main__":
-    demo.queue(max_size=20).launch()
+    app.queue(max_size=20).launch()
