@@ -404,16 +404,16 @@ def build_blocks(theme):
                 btn = gr.Button("Extract", variant="primary", size="lg")
             
             with gr.Column(scale=2):
-        with gr.Tabs():
-            with gr.Tab("Text"):
-                text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
-                dl_txt = gr.DownloadButton(label="Download Text", value=None)
-            with gr.Tab("Markdown"):
-                md_out = gr.Markdown("")
-                with gr.Row():
-                    dl_md = gr.DownloadButton(label="Download Markdown", value=None)
-                    dl_md_zip = gr.DownloadButton(label="Download Markdown (split pages)", value=None)
-            with gr.Tab("Boxes"):
+                with gr.Tabs():
+                    with gr.Tab("Text"):
+                        text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
+                        dl_txt = gr.DownloadButton(label="Download Text", value=None)
+                    with gr.Tab("Markdown"):
+                        md_out = gr.Markdown("")
+                        with gr.Row():
+                            dl_md = gr.DownloadButton(label="Download Markdown", value=None)
+                            dl_md_zip = gr.DownloadButton(label="Download Markdown (split pages)", value=None)
+                    with gr.Tab("Boxes"):
                         img_out = gr.Image(type="pil", height=500, show_label=False)
                     with gr.Tab("Cropped Images"):
                         gallery = gr.Gallery(show_label=False, columns=3, height=400)
