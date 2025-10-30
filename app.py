@@ -404,21 +404,22 @@ def build_blocks(theme):
                 btn = gr.Button("Extract", variant="primary", size="lg")
             
             with gr.Column(scale=2):
-                with gr.Tabs():
-                    with gr.Tab("📝 Text"):
-                        text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
-                    with gr.Tab("Markdown"):
-                        md_out = gr.Markdown("")
-                    with gr.Tab("Boxes"):
+        with gr.Tabs():
+            with gr.Tab("Text"):
+                text_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
+                dl_txt = gr.DownloadButton(label="Download Text", value=None)
+            with gr.Tab("Markdown"):
+                md_out = gr.Markdown("")
+                with gr.Row():
+                    dl_md = gr.DownloadButton(label="Download Markdown", value=None)
+                    dl_md_zip = gr.DownloadButton(label="Download Markdown (split pages)", value=None)
+            with gr.Tab("Boxes"):
                         img_out = gr.Image(type="pil", height=500, show_label=False)
                     with gr.Tab("Cropped Images"):
                         gallery = gr.Gallery(show_label=False, columns=3, height=400)
                     with gr.Tab("Raw"):
                         raw_out = gr.Textbox(lines=20, show_copy_button=True, show_label=False)
-                with gr.Row():
-                    dl_md = gr.DownloadButton(label="Download Markdown", value=None)
-                    dl_txt = gr.DownloadButton(label="Download Text", value=None)
-                    dl_md_zip = gr.DownloadButton(label="Download Markdown (split pages)", value=None)
+        
         
         with gr.Accordion("ℹ️ Info", open=False):
             gr.Markdown("""
@@ -441,7 +442,10 @@ def build_blocks(theme):
         task.change(toggle_prompt, [task], [prompt])
         
         def run(image, file_path, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages):
-            if image is not None:
+            # Prioritize file path for PDFs to process all pages
+            if file_path and isinstance(file_path, str) and file_path.lower().endswith('.pdf'):
+                text, md, raw, img, crops = process_file(file_path, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
+            elif image is not None:
                 text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
             elif file_path:
                 text, md, raw, img, crops = process_file(file_path, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
@@ -481,7 +485,7 @@ def build_blocks(theme):
 light_demo = build_blocks(gr.themes.Soft())
 dark_demo = build_blocks(gr.themes.Monochrome())
 
-app = gr.TabbedInterface([light_demo, dark_demo], ["🌞 Light", "🌙 Dark"]) 
+app = gr.TabbedInterface([light_demo, dark_demo], ["Light", "Dark"]) 
 
 if __name__ == "__main__":
     app.queue(max_size=20).launch()
