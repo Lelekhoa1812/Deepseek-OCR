@@ -255,37 +255,13 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     return cleaned, markdown, result, img_out, crops
 
 @spaces.GPU(duration=120)
-def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, max_retries=5, retry_backoff_seconds=5):
+def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indices=None, embed_figures=False, high_accuracy=False, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
     doc = fitz.open(path)
     texts, markdowns, raws, all_crops = [], [], [], []
+    if page_indices is None:
+        page_indices = list(range(len(doc)))
     
-    # Parse page range like "1-3,5"
-    def parse_ranges(s, total):
-        if not s.strip():
-            return list(range(total))
-        pages = set()
-        parts = [p.strip() for p in s.split(',') if p.strip()]
-        for part in parts:
-            if '-' in part:
-                a, b = part.split('-', 1)
-                try:
-                    a, b = int(a) - 1, int(b) - 1
-                except:
-                    continue
-                for x in range(max(0, a), min(total - 1, b) + 1):
-                    pages.add(x)
-            else:
-                try:
-                    idx = int(part) - 1
-                    if 0 <= idx < total:
-                        pages.add(idx)
-                except:
-                    continue
-        return sorted(pages)
-
-    target_pages = parse_ranges(page_range_text, len(doc))
-    
-    for i in target_pages:
+    for i in page_indices:
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
         img = Image.open(BytesIO(pix.tobytes("png")))
@@ -312,16 +288,75 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_range
     doc.close()
     
     sep = "\n\n---\n\n" if insert_separators else "\n\n"
-    return (sep.join(texts) if texts else "No text in PDF",
-            sep.join(markdowns) if markdowns else "No text in PDF",
+    return (sep.join(texts) if texts else "",
+            sep.join(markdowns) if markdowns else "",
             "\n\n".join(raws), None, all_crops)
+
+def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+    doc = fitz.open(path)
+    total_pages = len(doc)
+    doc.close()
+    
+    # Parse page range like "1-3,5"
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+
+    target_pages = parse_ranges(page_range_text, total_pages)
+
+    texts_all, mds_all, raws_all, crops_all = [], [], [], []
+    for start in range(0, len(target_pages), batch_size):
+        batch = target_pages[start:start+batch_size]
+        # Orchestrate retries outside GPU scope (retries at chunk level)
+        attempt = 0
+        while True:
+            try:
+                tx, mdx, rawx, _, cropsx = process_pdf(path, mode_label, task_label, custom_prompt, dpi=dpi, page_indices=batch, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        if tx:
+            texts_all.append(tx)
+        if mdx:
+            mds_all.append(mdx)
+        if rawx:
+            raws_all.append(rawx)
+        crops_all.extend(cropsx)
+
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
+            "\n\n".join(raws_all), None, crops_all)
 
 def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True):
     if not path:
         return "Error Upload file", "", "", None, []
     
     if path.lower().endswith('.pdf'):
-        return process_pdf(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+        return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
     else:
         return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
 
