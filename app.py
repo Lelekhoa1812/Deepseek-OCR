@@ -442,13 +442,20 @@ def build_blocks(theme):
         task.change(toggle_prompt, [task], [prompt])
         
         def run(image, file_path, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages):
+            # Normalize file path value from Gradio (can be str or dict)
+            fp = None
+            if isinstance(file_path, str):
+                fp = file_path
+            elif isinstance(file_path, dict):
+                fp = file_path.get('name') or file_path.get('path')
+            
             # Prioritize file path for PDFs to process all pages
-            if file_path and isinstance(file_path, str) and file_path.lower().endswith('.pdf'):
-                text, md, raw, img, crops = process_file(file_path, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
+            if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
             elif image is not None:
                 text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
-            elif file_path:
-                text, md, raw, img, crops = process_file(file_path, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
+            elif fp:
+                text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
             else:
                 return "Error uploading file or image", "", "", None, [], None, None, None
 
