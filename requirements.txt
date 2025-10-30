@@ -6,6 +6,6 @@ einops
 addict 
 easydict
 torchvision
-flash-attn==2.7.3
+flash-attn==2.7.3; platform_system == "Linux" and platform_machine == "x86_64"
 PyMuPDF
 hf_transfer
