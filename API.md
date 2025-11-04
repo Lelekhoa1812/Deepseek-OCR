@@ -13,12 +13,12 @@ client = Client("BinKhoaLe1812/DeepSeekOCR", hf_token="<HF_TOKEN>")
 
 result = client.predict(
     image=None,                              # or a local image path/URL
-    file_path="/absolute/path/to/doc.pdf",  # local PDF or image path
-    mode_label="Base",                      # one of: Gundam, Tiny, Small, Base, Large
-    task_label="Markdown",                  # one of: Markdown, Tables, Locate, Describe, Custom
-    custom_prompt="",                       # required for Custom/Locate
+    file_path="/absolute/path/to/doc.pdf",   # local PDF or image path
+    mode_label="Base",                       # one of: Gundam, Tiny, Small, Base, Large
+    task_label="Markdown",                   # one of: Markdown, Tables, Locate, Describe, Custom
+    custom_prompt="",                        # required for Custom/Locate
     dpi_val=300,                             # PDF DPI
-    page_range_text="",                     # e.g. "1-3,5"; empty = all pages
+    page_range_text="",                      # e.g. "1-3,5"; empty = all pages
     embed=True,                              # embed detected figures into Markdown
     hiacc=False,                             # high-accuracy second pass
     sep_pages=True,                          # insert --- between pages
