@@ -7,5 +7,5 @@ sdk: gradio
 sdk_version: 5.49.1
 app_file: app.py
 pinned: true
-short_description: 'Gradio-UI for DeepSeek-OCR with data pipeline" 
+short_description: 'Gradio DeepSeek-OCR with data pipeline'
 ---
