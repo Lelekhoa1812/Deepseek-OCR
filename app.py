@@ -555,7 +555,7 @@ def build_blocks(theme):
             return text, md, raw, img, crops, md_tmp.name, txt_tmp.name, zip_path
         
         btn.click(run, [input_img, file_in, mode, task, prompt, dpi, page_range, embed_fig, high_acc, page_seps],
-                  [text_out, md_out, raw_out, img_out, gallery, dl_md, dl_txt, dl_md_zip])
+                  [text_out, md_out, raw_out, img_out, gallery, dl_md, dl_txt, dl_md_zip], api_name="/run")
         
         return demo
 
