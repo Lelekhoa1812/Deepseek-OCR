@@ -1,13 +1,11 @@
 ---
-title: DeepSeek OCR Demo
-emoji: 🚀
+title: DeepSeek-OCR
+emoji: 📝
 colorFrom: red
-colorTo: red
+colorTo: blue
 sdk: gradio
 sdk_version: 5.49.1
 app_file: app.py
 pinned: true
-short_description: 'Try out DeepSeek-OCR'
+short_description: 'Gradio-UI for DeepSeek-OCR with data pipeline" 
 ---
-
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
