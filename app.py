@@ -185,6 +185,43 @@ TASK_LABEL_TO_KEY = {
 }
 KEY_TO_TASK_LABEL = {v: k for k, v in TASK_LABEL_TO_KEY.items()}
 
+# -----------------
+# Simple in-memory LRU cache for per-page results
+# -----------------
+PAGE_CACHE = {}
+PAGE_CACHE_ORDER = []
+PAGE_CACHE_CAPACITY = int(os.getenv("PAGE_CACHE_CAPACITY", "512"))
+PAGE_CACHE_LOCK = Lock()
+
+def _page_cache_get(key):
+    with PAGE_CACHE_LOCK:
+        val = PAGE_CACHE.get(key)
+        if val is not None:
+            # Move to end (most recent)
+            try:
+                PAGE_CACHE_ORDER.remove(key)
+            except ValueError:
+                pass
+            PAGE_CACHE_ORDER.append(key)
+        return val
+
+def _page_cache_set(key, value):
+    with PAGE_CACHE_LOCK:
+        if key in PAGE_CACHE:
+            PAGE_CACHE[key] = value
+            try:
+                PAGE_CACHE_ORDER.remove(key)
+            except ValueError:
+                pass
+            PAGE_CACHE_ORDER.append(key)
+            return
+        # Evict if needed
+        while len(PAGE_CACHE_ORDER) >= PAGE_CACHE_CAPACITY:
+            old_key = PAGE_CACHE_ORDER.pop(0)
+            PAGE_CACHE.pop(old_key, None)
+        PAGE_CACHE[key] = value
+        PAGE_CACHE_ORDER.append(key)
+
 def extract_grounding_references(text):
     pattern = r'(<\|ref\|>(.*?)<\|/ref\|><\|det\|>(.*?)<\|/det\|>)'
     return re.findall(pattern, text, re.DOTALL)
@@ -605,6 +642,17 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
         page_indices = list(range(len(doc)))
     
     for i in page_indices:
+        # Cache key for DeepSeekOCR per page
+        cache_key = ("DeepSeekOCR", path, int(dpi), int(i), mode_label, task_label, bool(embed_figures), bool(high_accuracy))
+        cached = _page_cache_get(cache_key)
+        if cached:
+            text, md, raw, crops = cached
+            if text and text.strip() and text != "No text":
+                texts.append(f"### Page {i + 1}\n\n{text}")
+                markdowns.append(f"### Page {i + 1}\n\n{md}")
+                raws.append(f"=== Page {i + 1} ===\n{raw}")
+                all_crops.extend(crops or [])
+            continue
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
         img = Image.open(BytesIO(pix.tobytes("png")))
@@ -616,7 +664,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
                 text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
                 # If we got a result (even if it's "No text"), break the retry loop
                 if text is not None:
-                break
+                    break
                 # If we got None or empty, retry
                 attempt += 1
                 if attempt >= max_retries:
@@ -638,6 +686,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
             markdowns.append(f"### Page {i + 1}\n\n{md}")
             raws.append(f"=== Page {i + 1} ===\n{raw}")
             all_crops.extend(crops)
+            _page_cache_set(cache_key, (text, md, raw, crops))
         elif text and (text.startswith("Error") or text.startswith("Inference error")):
             # Include error messages in output for debugging
             texts.append(f"### Page {i + 1}\n\n{text}")
@@ -651,7 +700,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
             sep.join(markdowns) if markdowns else "",
             "\n\n".join(raws), None, all_crops)
 
-def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
     doc = fitz.open(path)
     total_pages = len(doc)
     doc.close()
@@ -710,7 +759,7 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
-def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
     if not GEMINI_AVAILABLE or not GEMINI_KEYS:
         return "Gemini not available or no keys", "", "", None, []
     doc = fitz.open(path)
@@ -751,6 +800,16 @@ def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=
                 # Process each page to image and pass to Gemini
                 docx = fitz.open(path)
                 for i in batch:
+                    cache_key = ("Gemini", path, int(dpi), int(i), GEMINI_MODEL)
+                    cached = _page_cache_get(cache_key)
+                    if cached:
+                        text, md, raw, crops = cached
+                        if text and text.strip() and text != "No text":
+                            texts_all.append(f"### Page {i + 1}\n\n{text}")
+                            mds_all.append(f"### Page {i + 1}\n\n{md}")
+                            raws_all.append(f"=== Page {i + 1} ===\n{raw}")
+                            crops_all.extend(crops or [])
+                        continue
                     page = docx.load_page(i)
                     pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
                     img = Image.open(BytesIO(pix.tobytes("png")))
@@ -760,6 +819,7 @@ def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=
                         mds_all.append(f"### Page {i + 1}\n\n{md}")
                         raws_all.append(f"=== Page {i + 1} ===\n{raw}")
                         crops_all.extend(crops or [])
+                        _page_cache_set(cache_key, (text, md, raw, crops))
                     elif text and text.startswith("Error"):
                         texts_all.append(f"### Page {i + 1}\n\n{text}")
                         mds_all.append(f"### Page {i + 1}\n\n<!-- {text} -->")
@@ -786,6 +846,16 @@ def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=
         page_indices = list(range(len(doc)))
     
     for i in page_indices:
+        cache_key = ("PaddleOCR-VL", path, int(dpi), int(i))
+        cached = _page_cache_get(cache_key)
+        if cached:
+            text, md, raw, crops = cached
+            if text and text.strip() and text != "No text detected":
+                texts.append(f"### Page {i + 1}\n\n{text}")
+                markdowns.append(f"### Page {i + 1}\n\n{md}")
+                raws.append(f"=== Page {i + 1} ===\n{raw}")
+                all_crops.extend(crops or [])
+            continue
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
         img = Image.open(BytesIO(pix.tobytes("png")))
@@ -807,6 +877,7 @@ def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=
             markdowns.append(f"### Page {i + 1}\n\n{md}")
             raws.append(f"=== Page {i + 1} ===\n{raw}")
             all_crops.extend(crops)
+            _page_cache_set(cache_key, (text, md, raw, crops))
     
     doc.close()
     
@@ -815,7 +886,7 @@ def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=
             sep.join(markdowns) if markdowns else "",
             "\n\n".join(raws), None, all_crops)
 
-def process_pdf_all_paddleocrvl(path, dpi=300, page_range_text="", insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+def process_pdf_all_paddleocrvl(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
     """Process all pages of PDF using PaddleOCR-VL."""
     doc = fitz.open(path)
     total_pages = len(doc)
