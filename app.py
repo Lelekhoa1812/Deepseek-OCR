@@ -17,6 +17,18 @@ import subprocess
 import importlib
 import time
 import zipfile
+import atexit
+import functools
+from queue import Queue
+from threading import Event, Thread
+
+# PaddleOCR imports
+try:
+    from paddleocr import PaddleOCR, draw_ocr
+    PADDLEOCR_AVAILABLE = True
+except ImportError:
+    PADDLEOCR_AVAILABLE = False
+    warnings.warn("PaddleOCR not available. Install with: pip install paddleocr")
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
@@ -96,6 +108,86 @@ MODE_LABEL_TO_KEY = {
     "Large": "Large",
 }
 KEY_TO_MODE_LABEL = {v: k for k, v in MODE_LABEL_TO_KEY.items()}
+
+# PaddleOCR Configuration
+PADDLE_LANG_CONFIG = {
+    "ch": {"num_workers": 2},
+    "en": {"num_workers": 2},
+    "fr": {"num_workers": 1},
+    "german": {"num_workers": 1},
+    "korean": {"num_workers": 1},
+    "japan": {"num_workers": 1},
+}
+PADDLE_CONCURRENCY_LIMIT = 8
+
+# PaddleOCR Model Manager
+class PaddleOCRModelManager(object):
+    def __init__(self, num_workers, model_factory):
+        super().__init__()
+        self._model_factory = model_factory
+        self._queue = Queue()
+        self._workers = []
+        self._model_initialized_event = Event()
+        for _ in range(num_workers):
+            worker = Thread(target=self._worker, daemon=False)
+            worker.start()
+            self._model_initialized_event.wait()
+            self._model_initialized_event.clear()
+            self._workers.append(worker)
+
+    def infer(self, *args, **kwargs):
+        result_queue = Queue(maxsize=1)
+        self._queue.put((args, kwargs, result_queue))
+        success, payload = result_queue.get()
+        if success:
+            return payload
+        else:
+            raise payload
+
+    def close(self):
+        for _ in self._workers:
+            self._queue.put(None)
+        for worker in self._workers:
+            worker.join()
+
+    def _worker(self):
+        model = self._model_factory()
+        self._model_initialized_event.set()
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            args, kwargs, result_queue = item
+            try:
+                result = model.ocr(*args, **kwargs)
+                result_queue.put((True, result))
+            except Exception as e:
+                result_queue.put((False, e))
+            finally:
+                self._queue.task_done()
+
+# Initialize PaddleOCR model managers
+paddle_model_managers = {}
+if PADDLEOCR_AVAILABLE:
+    def create_paddle_model(lang):
+        return PaddleOCR(lang=lang, use_angle_cls=True, use_gpu=False)
+    
+    for lang, config in PADDLE_LANG_CONFIG.items():
+        try:
+            model_manager = PaddleOCRModelManager(
+                config["num_workers"], 
+                functools.partial(create_paddle_model, lang=lang)
+            )
+            paddle_model_managers[lang] = model_manager
+        except Exception as e:
+            warnings.warn(f"Failed to initialize PaddleOCR for language {lang}: {e}")
+
+def close_paddle_model_managers():
+    for manager in paddle_model_managers.values():
+        manager.close()
+
+if PADDLEOCR_AVAILABLE:
+    atexit.register(close_paddle_model_managers)
 
 TASK_PROMPTS = {
     "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
@@ -269,6 +361,130 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     
     return cleaned, markdown, result, img_out, crops
 
+def paddleocr_to_markdown(ocr_result):
+    """Convert PaddleOCR result to Markdown format."""
+    if not ocr_result or len(ocr_result) == 0:
+        return ""
+    
+    # Extract text lines from OCR result
+    # Format: result is a list of lines, each line is [bbox, (text, confidence)]
+    lines = []
+    for line in ocr_result:
+        if len(line) >= 2:
+            text = line[1][0] if isinstance(line[1], tuple) else str(line[1])
+            if text.strip():
+                lines.append(text.strip())
+    
+    # Join lines with newlines to preserve structure
+    markdown = "\n".join(lines)
+    
+    # Try to detect and format common structures
+    # Simple heuristic: if a line is short and followed by longer lines, it might be a heading
+    lines_split = markdown.split("\n")
+    formatted_lines = []
+    for i, line in enumerate(lines_split):
+        # If line is short (potential heading) and next line is longer, format as heading
+        if len(line) < 50 and i < len(lines_split) - 1:
+            next_line = lines_split[i + 1]
+            if len(next_line) > len(line) * 1.5:
+                # Check if it looks like a heading (no punctuation at end, or ends with colon)
+                if not line.endswith(('.', ',', ';')) or line.endswith(':'):
+                    formatted_lines.append(f"## {line}")
+                    continue
+        formatted_lines.append(line)
+    
+    return "\n".join(formatted_lines)
+
+def process_image_paddleocr(image, lang='en'):
+    """Process image using PaddleOCR and return results in Markdown format."""
+    if image is None:
+        return " Error Upload image", "", "", None, []
+    
+    if not PADDLEOCR_AVAILABLE:
+        return " PaddleOCR not available", "", "", None, []
+    
+    if lang not in paddle_model_managers:
+        return f" Language {lang} not available", "", "", None, []
+    
+    if image.mode in ('RGBA', 'LA', 'P'):
+        image = image.convert('RGB')
+    image = ImageOps.exif_transpose(image)
+    
+    # Save image to temporary file for PaddleOCR
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+    image.save(tmp.name, 'JPEG', quality=95)
+    tmp.close()
+    
+    try:
+        # Get OCR result
+        ocr_manager = paddle_model_managers[lang]
+        result = ocr_manager.infer(tmp.name, cls=True)
+        
+        if not result or len(result) == 0:
+            os.unlink(tmp.name)
+            return "No text detected", "", "", None, []
+        
+        # Extract OCR data
+        ocr_data = result[0]  # First (and typically only) result
+        boxes = [line[0] for line in ocr_data]
+        txts = [line[1][0] for line in ocr_data]
+        scores = [line[1][1] for line in ocr_data]
+        
+        # Convert to text
+        text = "\n".join(txts)
+        
+        # Convert to Markdown
+        markdown = paddleocr_to_markdown(ocr_data)
+        
+        # Create raw output with scores
+        raw_lines = []
+        for i, (txt, score) in enumerate(zip(txts, scores)):
+            raw_lines.append(f"[{i+1}] {txt} (confidence: {score:.2f})")
+        raw = "\n".join(raw_lines)
+        
+        # Draw bounding boxes
+        img_out = None
+        try:
+            # Try to draw OCR boxes
+            img_draw = image.copy()
+            draw = ImageDraw.Draw(img_draw)
+            overlay = Image.new('RGBA', img_draw.size, (0, 0, 0, 0))
+            draw2 = ImageDraw.Draw(overlay)
+            font = ImageFont.load_default()
+            
+            for box, txt, score in zip(boxes, txts, scores):
+                # Convert box coordinates to pixel coordinates
+                img_w, img_h = image.size
+                # Box format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                x_coords = [point[0] for point in box]
+                y_coords = [point[1] for point in box]
+                x1, y1 = int(min(x_coords)), int(min(y_coords))
+                x2, y2 = int(max(x_coords)), int(max(y_coords))
+                
+                color = (np.random.randint(50, 255), np.random.randint(50, 255), np.random.randint(50, 255))
+                color_a = color + (60,)
+                
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                draw2.rectangle([x1, y1, x2, y2], fill=color_a)
+                
+                text_bbox = draw.textbbox((0, 0), txt[:20], font=font)
+                tw, th = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+                ty = max(0, y1 - 20)
+                draw.rectangle([x1, ty, x1 + tw + 4, ty + th + 4], fill=color)
+                draw.text((x1 + 2, ty + 2), txt[:20], font=font, fill=(255, 255, 255))
+            
+            img_draw.paste(overlay, (0, 0), overlay)
+            img_out = img_draw
+        except Exception as e:
+            warnings.warn(f"Failed to draw bounding boxes: {e}")
+        
+        os.unlink(tmp.name)
+        return text, markdown, raw, img_out, []
+    
+    except Exception as e:
+        os.unlink(tmp.name)
+        return f"Error: {str(e)}", "", "", None, []
+
 @spaces.GPU(duration=120)
 def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indices=None, embed_figures=False, high_accuracy=False, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
     doc = fitz.open(path)
@@ -366,14 +582,115 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
-def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True):
+def process_pdf_paddleocr(path, lang='en', dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
+    """Process PDF using PaddleOCR."""
+    doc = fitz.open(path)
+    texts, markdowns, raws, all_crops = [], [], [], []
+    if page_indices is None:
+        page_indices = list(range(len(doc)))
+    
+    for i in page_indices:
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
+        img = Image.open(BytesIO(pix.tobytes("png")))
+        
+        attempt = 0
+        while True:
+            try:
+                text, md, raw, _, crops = process_image_paddleocr(img, lang=lang)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        
+        if text and text != "No text detected":
+            texts.append(f"### Page {i + 1}\n\n{text}")
+            markdowns.append(f"### Page {i + 1}\n\n{md}")
+            raws.append(f"=== Page {i + 1} ===\n{raw}")
+            all_crops.extend(crops)
+    
+    doc.close()
+    
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts) if texts else "",
+            sep.join(markdowns) if markdowns else "",
+            "\n\n".join(raws), None, all_crops)
+
+def process_pdf_all_paddleocr(path, lang='en', dpi=300, page_range_text="", insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+    """Process all pages of PDF using PaddleOCR."""
+    doc = fitz.open(path)
+    total_pages = len(doc)
+    doc.close()
+    
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+
+    target_pages = parse_ranges(page_range_text, total_pages)
+
+    texts_all, mds_all, raws_all, crops_all = [], [], [], []
+    for start in range(0, len(target_pages), batch_size):
+        batch = target_pages[start:start+batch_size]
+        attempt = 0
+        while True:
+            try:
+                tx, mdx, rawx, _, cropsx = process_pdf_paddleocr(path, lang=lang, dpi=dpi, page_indices=batch, insert_separators=insert_separators)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        if tx:
+            texts_all.append(tx)
+        if mdx:
+            mds_all.append(mdx)
+        if rawx:
+            raws_all.append(rawx)
+        crops_all.extend(cropsx)
+
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
+            "\n\n".join(raws_all), None, crops_all)
+
+def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, ocr_engine="DeepSeekOCR", lang='en'):
     if not path:
         return "Error Upload file", "", "", None, []
     
-    if path.lower().endswith('.pdf'):
-        return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+    if ocr_engine == "PaddleOCR":
+        if path.lower().endswith('.pdf'):
+            return process_pdf_all_paddleocr(path, lang=lang, dpi=dpi, page_range_text=page_range_text, insert_separators=insert_separators)
+        else:
+            return process_image_paddleocr(Image.open(path), lang=lang)
     else:
-        return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
+        if path.lower().endswith('.pdf'):
+            return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+        else:
+            return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
 
 def toggle_prompt(task_label):
     if task_label == "Custom":
@@ -431,9 +748,23 @@ def build_blocks(theme):
                 # PDF preview page selector container (visible only for PDFs)
                 page_seps = gr.Checkbox(value=True, label="Insert page separators (---)")
                 page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
-                # Processing options container
-                mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode")
-                task = gr.Dropdown(list(TASK_LABEL_TO_KEY.keys()), value="Markdown", label="Task")
+                # OCR Engine selector
+                ocr_engine = gr.Radio(
+                    choices=["DeepSeekOCR", "PaddleOCR"] if PADDLEOCR_AVAILABLE else ["DeepSeekOCR"],
+                    value="DeepSeekOCR",
+                    label="OCR Engine",
+                    info="Choose between DeepSeekOCR (AI-powered) or PaddleOCR (traditional OCR)"
+                )
+                # PaddleOCR language selector (visible only when PaddleOCR is selected)
+                paddle_lang = gr.Dropdown(
+                    choices=list(PADDLE_LANG_CONFIG.keys()) if PADDLEOCR_AVAILABLE else [],
+                    value="en" if PADDLEOCR_AVAILABLE else None,
+                    label="PaddleOCR Language",
+                    visible=False
+                )
+                # Processing options container (for DeepSeekOCR)
+                mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode (DeepSeekOCR)")
+                task = gr.Dropdown(list(TASK_LABEL_TO_KEY.keys()), value="Markdown", label="Task (DeepSeekOCR)")
                 prompt = gr.Textbox(label="Prompt", lines=2, visible=False)
                 with gr.Row():
                     embed_fig = gr.Checkbox(value=True, label="Embed figures into Markdown")
@@ -463,19 +794,28 @@ def build_blocks(theme):
         
         with gr.Accordion("ℹ️ Info", open=False):
             gr.Markdown("""
-            ### Modes
-            - ⚡ Gundam: 1024 base + 640 tiles with cropping - Best balance
-            - 🧩 Tiny: 512×512, no crop - Fastest
-            - 📄 Small: 640×640, no crop - Quick
-            - 📚 Base: 1024×1024, no crop - Standard
-            - 🖼️ Large: 1280×1280, no crop - Highest quality
+            ### OCR Engines
+            - **DeepSeekOCR**: AI-powered OCR with advanced document understanding and markdown conversion
+            - **PaddleOCR**: Traditional OCR engine supporting multiple languages (ch, en, fr, german, korean, japan)
             
-            ### Tasks
+            ### DeepSeekOCR Modes
+            - Gundam: 1024 base + 640 tiles with cropping - Best balance
+            - Tiny: 512×512, no crop - Fastest
+            - Small: 640×640, no crop - Quick
+            - Base: 1024×1024, no crop - Standard
+            - Large: 1280×1280, no crop - Highest quality
+            
+            ### DeepSeekOCR Tasks
             - Markdown: Convert document to structured markdown (grounding ✅)
             - Tables: Extract tables only as Markdown (grounding ✅)
             - Locate: Find specific text in image (grounding ✅)
             - Describe: General image description
             - Custom: Your own prompt (add `<|grounding|>` for boxes)
+            
+            ### PaddleOCR
+            - Select language from dropdown (ch, en, fr, german, korean, japan)
+            - Returns text and markdown with bounding boxes
+            - Supports both images and PDFs
             """)
         
         # Enhanced preview logic for PDFs: show the selected page and slider
@@ -512,7 +852,34 @@ def build_blocks(theme):
         dpi.release(update_preview_page, [file_in, page_slider, dpi], [input_img])
         task.change(toggle_prompt, [task], [prompt])
         
-        def run(image, file_path, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages):
+        def toggle_ocr_engine(engine):
+            """Show/hide controls based on selected OCR engine."""
+            if engine == "PaddleOCR":
+                return (
+                    gr.update(visible=False),  # mode
+                    gr.update(visible=False),  # task
+                    gr.update(visible=False),  # prompt
+                    gr.update(visible=False),  # embed_fig
+                    gr.update(visible=False),  # high_acc
+                    gr.update(visible=True)    # paddle_lang
+                )
+            else:
+                return (
+                    gr.update(visible=True),   # mode
+                    gr.update(visible=True),  # task
+                    gr.update(visible=False), # prompt (will be toggled by task)
+                    gr.update(visible=True),  # embed_fig
+                    gr.update(visible=True),  # high_acc
+                    gr.update(visible=False)  # paddle_lang
+                )
+        
+        ocr_engine.change(
+            toggle_ocr_engine,
+            [ocr_engine],
+            [mode, task, prompt, embed_fig, high_acc, paddle_lang]
+        )
+        
+        def run(image, file_path, ocr_engine_val, mode_label, task_label, custom_prompt, dpi_val, page_range_text, embed, hiacc, sep_pages, lang):
             # Normalize file path value from Gradio (can be str or dict)
             fp = None
             if isinstance(file_path, str):
@@ -520,15 +887,27 @@ def build_blocks(theme):
             elif isinstance(file_path, dict):
                 fp = file_path.get('name') or file_path.get('path')
             
-            # Prioritize file path for PDFs to process all pages
-            if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
-                text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
-            elif image is not None:
-                text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
-            elif fp:
-                text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages)
+            # Route to appropriate OCR engine
+            if ocr_engine_val == "PaddleOCR":
+                # PaddleOCR processing
+                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="PaddleOCR", lang=lang)
+                elif image is not None:
+                    text, md, raw, img, crops = process_image_paddleocr(image, lang=lang)
+                elif fp:
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="PaddleOCR", lang=lang)
+                else:
+                    return "Error uploading file or image", "", "", None, [], None, None, None
             else:
-                return "Error uploading file or image", "", "", None, [], None, None, None
+                # DeepSeekOCR processing
+                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR", lang=lang)
+                elif image is not None:
+                    text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
+                elif fp:
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR", lang=lang)
+                else:
+                    return "Error uploading file or image", "", "", None, [], None, None, None
 
             # Create temp files for download
             md_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".md")
@@ -554,14 +933,13 @@ def build_blocks(theme):
                 zip_path = None
             return text, md, raw, img, crops, md_tmp.name, txt_tmp.name, zip_path
         
-        btn.click(run, [input_img, file_in, mode, task, prompt, dpi, page_range, embed_fig, high_acc, page_seps],
+        btn.click(run, [input_img, file_in, ocr_engine, mode, task, prompt, dpi, page_range, embed_fig, high_acc, page_seps, paddle_lang],
                   [text_out, md_out, raw_out, img_out, gallery, dl_md, dl_txt, dl_md_zip])
         
         return demo
 
-# Build two themed experiences as a light/dark separator without custom CSS/JS
-light_demo = build_blocks(gr.themes.Soft())
-dark_demo = build_blocks(gr.themes.Monochrome())
+# Build the demo
+demo = build_blocks(gr.themes.Soft())
 
 if __name__ == "__main__":
-    app.queue(max_size=20).launch()
+    demo.queue(max_size=20).launch()
