@@ -17,21 +17,25 @@ import subprocess
 import importlib
 import time
 import zipfile
-import logging
-
-# Configure logging to be visible in console and Gradio
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stderr),  # Use stderr so it's visible in Gradio
-    ]
-)
-logger = logging.getLogger(__name__)
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+# Ensure pad token and padding side to avoid attention mask warnings
+try:
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+            # Resize embeddings if special token was newly added
+            try:
+                model.resize_token_embeddings(len(tokenizer))
+            except Exception:
+                pass
+    tokenizer.padding_side = 'right'
+except Exception:
+    pass
  
 def ensure_flash_attn_if_cuda():
     # Only attempt install when CUDA is available
@@ -52,83 +56,6 @@ def ensure_flash_attn_if_cuda():
         return True
     except Exception:
         return False
-# Suppress specific transformers warnings that are expected
-warnings.filterwarnings('ignore', category=UserWarning, module='transformers.generation.configuration_utils')
-warnings.filterwarnings('ignore', message='.*pad_token_id.*eos_token_id.*')
-warnings.filterwarnings('ignore', message='.*attention mask.*pad token id.*')
-warnings.filterwarnings('ignore', message='.*attention mask.*cannot be inferred.*')
-warnings.filterwarnings('ignore', message='.*seen_tokens.*deprecated.*')
-warnings.filterwarnings('ignore', message='.*get_max_cache.*deprecated.*')
-warnings.filterwarnings('ignore', message='.*position_ids.*position_embeddings.*')
-warnings.filterwarnings('ignore', message='.*do_sample.*temperature.*')
-
-def verify_gpu_access():
-    """Verify that GPU is actually accessible by creating a test tensor."""
-    if not torch.cuda.is_available():
-        return False
-    try:
-        # Try to create a tensor on GPU to verify actual access
-        test_tensor = torch.zeros(1, device='cuda')
-        del test_tensor
-        torch.cuda.empty_cache()
-        return True
-    except Exception:
-        return False
-
-def wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1):
-    """Wait for GPU to become available and move model to GPU.
-    For ZeroGPU, the GPU may take time to attach after entering @spaces.GPU() context.
-    Returns True if model is on GPU, False otherwise.
-    """
-    device = next(model.parameters()).device
-    if device.type == 'cuda':
-        return True
-    
-    if not torch.cuda.is_available():
-        return False
-    
-    # Wait for GPU to become accessible with retries
-    start_time = time.time()
-    attempts = 0
-    while time.time() - start_time < max_wait_seconds:
-        attempts += 1
-        elapsed = time.time() - start_time
-        try:
-            # Try to verify GPU access
-            if verify_gpu_access():
-                # GPU is accessible, try to move model
-                try:
-                    model.cuda()
-                    # Verify it actually moved
-                    new_device = next(model.parameters()).device
-                    if new_device.type == 'cuda':
-                        logger.info(f"Model moved to GPU after {attempts} attempts ({elapsed:.1f}s): {new_device}")
-                        return True
-                except Exception as e:
-                    logger.debug(f"Attempt {attempts}: Failed to move model to GPU: {e}")
-            else:
-                logger.debug(f"Attempt {attempts} ({elapsed:.1f}s): GPU not yet accessible, waiting...")
-        except Exception as e:
-            logger.debug(f"Attempt {attempts}: GPU check failed: {e}")
-        
-        # Sleep before next attempt, but check if we have time left
-        if time.time() - start_time < max_wait_seconds - retry_interval:
-            time.sleep(retry_interval)
-        else:
-            break  # Not enough time for another attempt
-    
-    # Final check
-    device = next(model.parameters()).device
-    if device.type == 'cuda':
-        return True
-    
-    # Even if model shows as CPU, CUDA may still be available and working
-    if torch.cuda.is_available():
-        logger.info(f"Model shows on {device} but CUDA is available. Inference will proceed with CUDA.")
-    else:
-        logger.warning(f"GPU not available after {max_wait_seconds}s wait. Model remains on {device}")
-    return False
-
 flash_ok = ensure_flash_attn_if_cuda()
 try:
     model = AutoModel.from_pretrained(
@@ -138,66 +65,19 @@ try:
         trust_remote_code=True,
         use_safetensors=True,
     )
-    if torch.cuda.is_available() and verify_gpu_access():
+    if torch.cuda.is_available():
         model = model.eval().cuda()
-        # Verify model actually ended up on GPU
-        actual_device = next(model.parameters()).device
-        if actual_device.type == 'cuda':
-            logger.info(f"Model loaded on GPU: {actual_device}")
-        else:
-            raise RuntimeError(f"Model failed to load on GPU. Device: {actual_device}")
     else:
-        raise RuntimeError("CUDA not available or GPU not accessible; cannot use flash attention")
+        raise RuntimeError("CUDA not available; cannot use flash attention")
 except Exception as e:
-    logger.warning(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
+    warnings.warn(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
     model = AutoModel.from_pretrained(
         MODEL_NAME,
         trust_remote_code=True,
         use_safetensors=True,
     )
-    # Try GPU first, fallback to CPU
-    if torch.cuda.is_available() and verify_gpu_access():
-        try:
-            model = model.to('cuda').eval()
-            actual_device = next(model.parameters()).device
-            if actual_device.type == 'cuda':
-                logger.info(f"Model loaded on GPU: {actual_device}")
-            else:
-                raise RuntimeError("Failed to move model to GPU")
-        except Exception as e2:
-            logger.warning(f"Failed to load on GPU ({e2}), falling back to CPU")
-            model = model.to('cpu').eval()
-            logger.warning("Model loaded on CPU - this may cause performance issues and 'No text in PDF' errors. GPU is required for proper operation.")
-    else:
-        model = model.to('cpu').eval()
-        logger.warning("Model loaded on CPU - this may cause performance issues and 'No text in PDF' errors. GPU is required for proper operation.")
-
-# Configure tokenizer after model is loaded
-try:
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token_id is not None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            # Add a pad token if eos_token is also None
-            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
-            # Resize model embeddings if needed
-            if hasattr(model, 'resize_token_embeddings'):
-                try:
-                    model.resize_token_embeddings(len(tokenizer))
-                except Exception:
-                    pass
-    tokenizer.padding_side = 'right'
-    
-    # Try to set pad_token_id in model's generation config if available
-    if hasattr(model, 'generation_config'):
-        if hasattr(model.generation_config, 'pad_token_id') and model.generation_config.pad_token_id is None:
-            model.generation_config.pad_token_id = tokenizer.pad_token_id
-        if hasattr(model.generation_config, 'eos_token_id') and model.generation_config.eos_token_id is None:
-            model.generation_config.eos_token_id = tokenizer.eos_token_id
-except Exception as e:
-    # Silently continue if configuration fails
-    pass
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device).eval()
 
 MODEL_CONFIGS = {
     "Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
@@ -307,25 +187,9 @@ def embed_images(markdown, crops):
 @spaces.GPU(duration=120)
 def process_image(image, mode_label, task_label, custom_prompt, embed_figures=False, high_accuracy=False):
     if image is None:
-        logger.warning("No image provided")
         return " Error Upload image", "", "", None, []
     if task_label in ["Custom", "Locate"] and not custom_prompt.strip():
-        logger.warning("Custom prompt not provided")
         return "Enter prompt", "", "", None, []
-    
-    # Wait for GPU and move model (ZeroGPU may take time to attach)
-    # Since we're in @spaces.GPU() context, assume GPU will become available
-    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
-    
-    device = next(model.parameters()).device
-    cuda_available = torch.cuda.is_available()
-    logger.info(f"Processing image - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
-    
-    # Proceed with processing even if device shows as CPU but CUDA is available
-    # CUDA may be working even if detection failed
-    if device.type == 'cpu' and cuda_available:
-        logger.warning(f"Device shows as CPU but CUDA is available. Proceeding with inference - CUDA will be used automatically.")
     
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
@@ -354,29 +218,18 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     stdout = sys.stdout
     sys.stdout = StringIO()
     
-    try:
-        logger.info(f"Running inference with mode: {mode_key}, task: {task_key}")
-        model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
-                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
-        
-        result = '\n'.join([l for l in sys.stdout.getvalue().split('\n') 
-                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
-        logger.info(f"Inference completed. Result length: {len(result)}")
-    except Exception as e:
-        result = ""
-        error_msg = f"Error during inference: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        # Also print to stderr so it's visible
-        print(f"ERROR: {error_msg}", file=sys.stderr)
-    finally:
-        sys.stdout = stdout
-        os.unlink(tmp.name)
-        shutil.rmtree(out_dir, ignore_errors=True)
+    model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
+                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+    
+    result = '\n'.join([l for l in sys.stdout.getvalue().split('\n') 
+                        if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+    sys.stdout = stdout
+    
+    os.unlink(tmp.name)
+    shutil.rmtree(out_dir, ignore_errors=True)
     
     if not result:
-        error_msg = f"No text extracted from image. This may occur if GPU is unavailable or inference failed. Device: {device.type}, CUDA available: {torch.cuda.is_available()}"
-        logger.error(error_msg)
-        return error_msg, "", "", None, []
+        return "No text", "", "", None, []
     
     cleaned = clean_output(result, False, False)
     markdown = clean_output(result, True, True)
@@ -401,19 +254,13 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         out_dir2 = tempfile.mkdtemp()
         stdout2 = sys.stdout
         sys.stdout = StringIO()
-        try:
-            logger.info("Running high accuracy refinement pass")
-            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
-                        base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
-            refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
-                                if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
-        except Exception as e:
-            refine_result = ""
-            logger.warning(f"High accuracy refinement failed: {str(e)}", exc_info=True)
-        finally:
-            sys.stdout = stdout2
-            os.unlink(tmp2.name)
-            shutil.rmtree(out_dir2, ignore_errors=True)
+        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
+                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+        sys.stdout = stdout2
+        os.unlink(tmp2.name)
+        shutil.rmtree(out_dir2, ignore_errors=True)
         if refine_result:
             refined_md = clean_output(refine_result, embed_figures, True)
             # Prefer refined markdown if longer (heuristic)
@@ -424,31 +271,12 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
 
 @spaces.GPU(duration=120)
 def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indices=None, embed_figures=False, high_accuracy=False, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
-    logger.info(f"Processing PDF: {path}, pages: {page_indices}")
     doc = fitz.open(path)
     texts, markdowns, raws, all_crops = [], [], [], []
     if page_indices is None:
         page_indices = list(range(len(doc)))
     
-    # Note: This function is called from within a GPU context, so GPU should already be available
-    # Move model to GPU if needed
-    device = next(model.parameters()).device
-    if device.type != 'cuda' and torch.cuda.is_available():
-        try:
-            model.cuda()
-            device = next(model.parameters()).device
-        except Exception as e:
-            logger.warning(f"Could not move model to GPU: {e}")
-    
-    cuda_available = torch.cuda.is_available()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}")
-    
-    # Proceed with processing even if device shows as CPU but CUDA is available
-    if device.type == 'cpu' and cuda_available:
-        logger.warning(f"Device shows as CPU but CUDA is available. Proceeding with inference - CUDA will be used automatically.")
-    
     for i in page_indices:
-        logger.info(f"Processing page {i+1}/{len(page_indices)}")
         page = doc.load_page(i)
         pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
         img = Image.open(BytesIO(pix.tobytes("png")))
@@ -458,40 +286,19 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
         while True:
             try:
                 text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
-                # Check if we got an error message about GPU
-                if text and text.startswith("Error: GPU not available"):
-                    logger.error(f"GPU error detected on page {i+1}: {text}")
-                    attempt = max_retries  # Force exit retry loop
-                    break
-                # Check if result is empty (likely CPU inference failure)
-                if not text or text.strip() == "" or "No text extracted" in text:
-                    logger.warning(f"Empty result for page {i+1}. Text: {text[:100] if text else 'None'}")
                 break
-            except Exception as e:
+            except Exception:
                 attempt += 1
-                logger.error(f"Error processing page {i+1}, attempt {attempt}/{max_retries}: {str(e)}", exc_info=True)
                 if attempt >= max_retries:
-                    error_detail = str(e) if str(e) else "Unknown error"
-                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after {max_retries} retries: {error_detail} -->", "", []
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         
-        # Skip pages that failed or returned errors
-        if text and text != "No text" and not text.startswith("Error:") and "No text extracted" not in text:
+        if text and text != "No text":
             texts.append(f"### Page {i + 1}\n\n{text}")
             markdowns.append(f"### Page {i + 1}\n\n{md}")
             raws.append(f"=== Page {i + 1} ===\n{raw}")
             all_crops.extend(crops)
-            logger.info(f"Successfully processed page {i+1}")
-        elif text and text.startswith("Error: GPU not available"):
-            # If GPU error, add a note and stop processing
-            logger.error(f"Stopping PDF processing due to GPU error on page {i+1}")
-            texts.append(f"### Page {i + 1}\n\n{text}")
-            markdowns.append(f"### Page {i + 1}\n\n{text}")
-            raws.append(f"=== Page {i + 1} ===\n{text}")
-            break  # Stop processing remaining pages
-        else:
-            logger.warning(f"Skipping page {i+1} - empty result or error: {text[:100] if text else 'None'}")
     
     doc.close()
     
@@ -500,27 +307,10 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
             sep.join(markdowns) if markdowns else "",
             "\n\n".join(raws), None, all_crops)
 
-@spaces.GPU(duration=120)
 def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
-    logger.info(f"Starting PDF processing for: {path}")
     doc = fitz.open(path)
     total_pages = len(doc)
     doc.close()
-    logger.info(f"PDF has {total_pages} pages")
-    
-    # Wait for GPU and move model (ZeroGPU may take time to attach)
-    # This is the main GPU context for all batches
-    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
-    
-    device = next(model.parameters()).device
-    cuda_available = torch.cuda.is_available()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
-    
-    # Proceed with processing even if device shows as CPU but CUDA is available
-    # CUDA may be working even if detection failed
-    if device.type == 'cpu' and cuda_available:
-        logger.warning(f"Device shows as CPU but CUDA is available. Proceeding with inference - CUDA will be used automatically.")
     
     # Parse page range like "1-3,5"
     def parse_ranges(s, total):
@@ -547,40 +337,20 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
         return sorted(pages)
 
     target_pages = parse_ranges(page_range_text, total_pages)
-    logger.info(f"Processing pages: {target_pages}")
 
     texts_all, mds_all, raws_all, crops_all = [], [], [], []
     for start in range(0, len(target_pages), batch_size):
         batch = target_pages[start:start+batch_size]
-        logger.info(f"Processing batch: pages {batch}")
         # Orchestrate retries outside GPU scope (retries at chunk level)
         attempt = 0
         while True:
             try:
                 tx, mdx, rawx, _, cropsx = process_pdf(path, mode_label, task_label, custom_prompt, dpi=dpi, page_indices=batch, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
                 break
-            except Exception as e:
+            except Exception:
                 attempt += 1
-                error_str = str(e)
-                # Check for expired token error specifically
-                if "Expired ZeroGPU proxy token" in error_str or "Expired" in error_str:
-                    logger.error(f"ZeroGPU token expired during batch {start//batch_size+1}, attempt {attempt}/{max_retries}. This may happen during long processing. Partial results will be returned.")
-                    # Return partial results and stop processing
-                    if texts_all or mds_all or raws_all:
-                        sep = "\n\n---\n\n" if insert_separators else "\n\n"
-                        partial_msg = f"\n\n<!-- Processing stopped due to expired GPU token after batch {start//batch_size+1}. Partial results shown above. -->"
-                        return (sep.join(texts_all) + partial_msg if texts_all else partial_msg,
-                                sep.join(mds_all) + partial_msg if mds_all else partial_msg,
-                                "\n\n".join(raws_all) + partial_msg if raws_all else partial_msg,
-                                None, crops_all)
-                    else:
-                        error_msg = "Error: ZeroGPU token expired before any batches completed. Please try again with a smaller page range or wait and retry."
-                        logger.error(error_msg)
-                        return (error_msg, error_msg, error_msg, None, crops_all)
-                
-                logger.error(f"Error processing batch {start//batch_size+1}, attempt {attempt}/{max_retries}: {error_str}", exc_info=True)
                 if attempt >= max_retries:
-                    tx, mdx, rawx, cropsx = "", f"<!-- Failed batch {start//batch_size+1} after {max_retries} retries: {error_str} -->", "", []
+                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         if tx:
@@ -592,24 +362,8 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
         crops_all.extend(cropsx)
 
     sep = "\n\n---\n\n" if insert_separators else "\n\n"
-    # Check if we got GPU errors
-    has_gpu_error = any("GPU not available" in txt for txt in texts_all) or any("GPU not available" in md for md in mds_all)
-    if has_gpu_error:
-        error_msg = "Error: GPU not available. ZeroGPU limit may be reached. Please wait and try again."
-        logger.error(error_msg)
-        return (error_msg, error_msg, error_msg, None, crops_all)
-    
-    # Check if we have any results
-    if not texts_all:
-        device = next(model.parameters()).device
-        cuda_available = torch.cuda.is_available()
-        error_msg = f"No text in PDF. This may occur if:\n1. GPU is unavailable (device: {device.type}, CUDA available: {cuda_available})\n2. All pages failed to process\n3. PDF contains only images without text\n\nCheck logs for detailed error information."
-        logger.error(error_msg)
-        return (error_msg, error_msg, error_msg, None, crops_all)
-    
-    logger.info(f"Successfully processed PDF with {len(texts_all)} batches")
-    return (sep.join(texts_all),
-            sep.join(mds_all),
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
 def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True):
@@ -808,8 +562,6 @@ def build_blocks(theme):
 # Build two themed experiences as a light/dark separator without custom CSS/JS
 light_demo = build_blocks(gr.themes.Soft())
 dark_demo = build_blocks(gr.themes.Monochrome())
-
-app = gr.TabbedInterface([light_demo, dark_demo], ["Light", "Dark"]) 
 
 if __name__ == "__main__":
     app.queue(max_size=20).launch()
