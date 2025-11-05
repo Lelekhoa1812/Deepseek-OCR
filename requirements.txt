@@ -8,3 +8,4 @@ easydict
 torchvision
 PyMuPDF
 hf_transfer
+paddleocr[doc-parser]
