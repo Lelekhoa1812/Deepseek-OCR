@@ -430,17 +430,20 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
     if page_indices is None:
         page_indices = list(range(len(doc)))
     
-    # Wait for GPU and move model (ZeroGPU may take time to attach)
-    # Since we're in @spaces.GPU() context, assume GPU will become available
-    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
-    
+    # Note: This function is called from within a GPU context, so GPU should already be available
+    # Move model to GPU if needed
     device = next(model.parameters()).device
+    if device.type != 'cuda' and torch.cuda.is_available():
+        try:
+            model.cuda()
+            device = next(model.parameters()).device
+        except Exception as e:
+            logger.warning(f"Could not move model to GPU: {e}")
+    
     cuda_available = torch.cuda.is_available()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
+    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}")
     
     # Proceed with processing even if device shows as CPU but CUDA is available
-    # CUDA may be working even if detection failed
     if device.type == 'cpu' and cuda_available:
         logger.warning(f"Device shows as CPU but CUDA is available. Proceeding with inference - CUDA will be used automatically.")
     
@@ -497,6 +500,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
             sep.join(markdowns) if markdowns else "",
             "\n\n".join(raws), None, all_crops)
 
+@spaces.GPU(duration=120)
 def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
     logger.info(f"Starting PDF processing for: {path}")
     doc = fitz.open(path)
@@ -505,7 +509,7 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
     logger.info(f"PDF has {total_pages} pages")
     
     # Wait for GPU and move model (ZeroGPU may take time to attach)
-    # Since we're in @spaces.GPU() context, assume GPU will become available
+    # This is the main GPU context for all batches
     logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
     gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
     
@@ -557,9 +561,26 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
                 break
             except Exception as e:
                 attempt += 1
-                logger.error(f"Error processing batch {start//batch_size+1}, attempt {attempt}/{max_retries}: {str(e)}", exc_info=True)
+                error_str = str(e)
+                # Check for expired token error specifically
+                if "Expired ZeroGPU proxy token" in error_str or "Expired" in error_str:
+                    logger.error(f"ZeroGPU token expired during batch {start//batch_size+1}, attempt {attempt}/{max_retries}. This may happen during long processing. Partial results will be returned.")
+                    # Return partial results and stop processing
+                    if texts_all or mds_all or raws_all:
+                        sep = "\n\n---\n\n" if insert_separators else "\n\n"
+                        partial_msg = f"\n\n<!-- Processing stopped due to expired GPU token after batch {start//batch_size+1}. Partial results shown above. -->"
+                        return (sep.join(texts_all) + partial_msg if texts_all else partial_msg,
+                                sep.join(mds_all) + partial_msg if mds_all else partial_msg,
+                                "\n\n".join(raws_all) + partial_msg if raws_all else partial_msg,
+                                None, crops_all)
+                    else:
+                        error_msg = "Error: ZeroGPU token expired before any batches completed. Please try again with a smaller page range or wait and retry."
+                        logger.error(error_msg)
+                        return (error_msg, error_msg, error_msg, None, crops_all)
+                
+                logger.error(f"Error processing batch {start//batch_size+1}, attempt {attempt}/{max_retries}: {error_str}", exc_info=True)
                 if attempt >= max_retries:
-                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
+                    tx, mdx, rawx, cropsx = "", f"<!-- Failed batch {start//batch_size+1} after {max_retries} retries: {error_str} -->", "", []
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         if tx:
