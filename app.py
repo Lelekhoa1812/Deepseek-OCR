@@ -954,10 +954,10 @@ def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_rang
         else:
             return process_image_paddleocrvl(Image.open(path))
     else:
-    if path.lower().endswith('.pdf'):
-        return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
-    else:
-        return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
+        if path.lower().endswith('.pdf'):
+            return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+        else:
+            return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
 
 def toggle_prompt(task_label):
     if task_label == "Custom":
@@ -1176,7 +1176,7 @@ def build_blocks(theme):
             elif image is not None:
                 text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
             elif fp:
-                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR")
+                text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR")
             else:
                 return "Error uploading file or image", "", "", None, [], None, None, None
 
