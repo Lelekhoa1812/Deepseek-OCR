@@ -10,3 +10,8 @@ PyMuPDF
 hf_transfer
 paddleocr[doc-parser]
 paddlepaddle>=2.6.0,<3
+gradio==5.49.1
+spaces
+google-genai>=0.7.0
+Pillow
+numpy

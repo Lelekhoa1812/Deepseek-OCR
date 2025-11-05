@@ -21,6 +21,8 @@ import atexit
 import functools
 from queue import Queue
 from threading import Event, Thread
+from threading import Lock
+from itertools import cycle
 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
@@ -39,6 +41,35 @@ try:
 except ImportError:
     PADDLEOCRVL_AVAILABLE = False
     warnings.warn("PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'")
+
+# Gemini imports (optional)
+try:
+    import google as genai
+    GEMINI_AVAILABLE = True
+except Exception:
+    GEMINI_AVAILABLE = False
+    warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
+
+# Gather Gemini API keys from environment and prepare round-robin iterator
+GEMINI_KEYS = [
+    os.getenv("GEMINI_API_1"),
+    os.getenv("GEMINI_API_2"),
+    os.getenv("GEMINI_API_3"),
+    os.getenv("GEMINI_API_4"),
+    os.getenv("GEMINI_API_5"),
+]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
+_gemini_cycle = cycle(GEMINI_KEYS) if GEMINI_KEYS else None
+_gemini_lock = Lock()
+
+def _get_next_gemini_key():
+    if not GEMINI_AVAILABLE or not _gemini_cycle:
+        return None
+    with _gemini_lock:
+        return next(_gemini_cycle)
+
+# Allow overriding model via env, default to a stable flash model
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
@@ -229,6 +260,45 @@ def embed_images(markdown, crops):
         b64 = base64.b64encode(buf.getvalue()).decode()
         markdown = markdown.replace(f'**[Figure {i + 1}]**', f'\n\n![Figure {i + 1}](data:image/png;base64,{b64})\n\n', 1)
     return markdown
+
+def _image_to_jpeg_bytes(image: Image.Image) -> bytes:
+    if image.mode in ('RGBA', 'LA', 'P'):
+        image = image.convert('RGB')
+    buf = BytesIO()
+    image.save(buf, format='JPEG', quality=95)
+    return buf.getvalue()
+
+def _build_gemini_system_prompt():
+    return (
+        "You are an expert document parser. Convert the given document image to GitHub-flavored Markdown. "
+        "Preserve headings, lists, links, code blocks, and tables with correct alignment and borders. "
+        "Keep the reading order, avoid hallucinations, and output Markdown only."
+    )
+
+def process_image_gemini(image: Image.Image):
+    if image is None:
+        return " Error Upload image", "", "", None, []
+    if not GEMINI_AVAILABLE or not GEMINI_KEYS:
+        return " Gemini not available or no API keys set in .env", "", "", None, []
+    key = _get_next_gemini_key()
+    if not key:
+        return " Gemini API keys not configured", "", "", None, []
+
+    try:
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        img_bytes = _image_to_jpeg_bytes(image)
+        system_prompt = _build_gemini_system_prompt()
+        resp = model.generate_content([
+            system_prompt,
+            {"mime_type": "image/jpeg", "data": img_bytes},
+        ])
+        md = (resp.text or "").strip()
+        if not md:
+            return "No text", "", "", None, []
+        return md, md, md, None, []
+    except Exception as e:
+        return f"Error: {str(e)}", "", "", None, []
 
 @spaces.GPU(duration=120)
 def process_image(image, mode_label, task_label, custom_prompt, embed_figures=False, high_accuracy=False):
@@ -634,6 +704,74 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
+def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=True, batch_size=5, max_retries=5, retry_backoff_seconds=5):
+    if not GEMINI_AVAILABLE or not GEMINI_KEYS:
+        return "Gemini not available or no keys", "", "", None, []
+    doc = fitz.open(path)
+    total_pages = len(doc)
+    doc.close()
+
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+
+    target_pages = parse_ranges(page_range_text, total_pages)
+
+    texts_all, mds_all, raws_all, crops_all = [], [], [], []
+    for start in range(0, len(target_pages), batch_size):
+        batch = target_pages[start:start+batch_size]
+        attempt = 0
+        while True:
+            try:
+                # Process each page to image and pass to Gemini
+                docx = fitz.open(path)
+                for i in batch:
+                    page = docx.load_page(i)
+                    pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
+                    img = Image.open(BytesIO(pix.tobytes("png")))
+                    text, md, raw, _, crops = process_image_gemini(img)
+                    if text and text != "No text" and not text.startswith("Error"):
+                        texts_all.append(f"### Page {i + 1}\n\n{text}")
+                        mds_all.append(f"### Page {i + 1}\n\n{md}")
+                        raws_all.append(f"=== Page {i + 1} ===\n{raw}")
+                        crops_all.extend(crops or [])
+                    elif text and text.startswith("Error"):
+                        texts_all.append(f"### Page {i + 1}\n\n{text}")
+                        mds_all.append(f"### Page {i + 1}\n\n<!-- {text} -->")
+                        raws_all.append(f"=== Page {i + 1} ===\n{text}")
+                docx.close()
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    mds_all.append(f"<!-- Failed batch {start//batch_size+1} -->")
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
+            "\n\n".join(raws_all), None, crops_all)
+
 def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
     """Process PDF using PaddleOCR-VL."""
     doc = fitz.open(path)
@@ -802,10 +940,10 @@ def build_blocks(theme):
                 page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
                 # OCR Engine selector
                 ocr_engine = gr.Radio(
-                    choices=["DeepSeekOCR", "PaddleOCR-VL"] if PADDLEOCRVL_AVAILABLE else ["DeepSeekOCR"],
+                    choices=[c for c in ["DeepSeekOCR", "PaddleOCR-VL", "Gemini Flash 2.5"] if (c != "PaddleOCR-VL" or PADDLEOCRVL_AVAILABLE) and (c != "Gemini Flash 2.5" or GEMINI_AVAILABLE)],
                     value="DeepSeekOCR",
                     label="OCR Engine",
-                    info="Choose between DeepSeekOCR (AI-powered) or PaddleOCR-VL (document parsing)"
+                    info="Choose between DeepSeekOCR, PaddleOCR-VL, or Gemini Flash 2.5"
                 )
                 # Processing options container (for DeepSeekOCR)
                 mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode (DeepSeekOCR)")
@@ -842,6 +980,7 @@ def build_blocks(theme):
             ### OCR Engines
             - **DeepSeekOCR**: AI-powered OCR with advanced document understanding and markdown conversion
             - **PaddleOCR-VL**: Document parsing model that converts documents to markdown format (install with: `pip install 'paddleocr[doc-parser]'`)
+            - **Gemini Flash 2.5**: Google Gemini model for fast, high-quality Markdown conversion (set GEMINI_API_1..5 in .env)
             
             ### DeepSeekOCR Modes
             - Gundam: 1024 base + 640 tiles with cropping - Best balance
@@ -851,15 +990,18 @@ def build_blocks(theme):
             - Large: 1280×1280, no crop - Highest quality
             
             ### DeepSeekOCR Tasks
-            - Markdown: Convert document to structured markdown (grounding ✅)
-            - Tables: Extract tables only as Markdown (grounding ✅)
-            - Locate: Find specific text in image (grounding ✅)
+            - Markdown: Convert document to structured markdown (grounding)
+            - Tables: Extract tables only as Markdown (grounding)
+            - Locate: Find specific text in image (grounding)
             - Describe: General image description
             - Custom: Your own prompt (add `<|grounding|>` for boxes)
             
             ### PaddleOCR-VL
             - Document parsing model that automatically converts documents to markdown
             - Supports both images and PDFs
+
+            ### Gemini Flash 2.5
+            - Google Gemini model for fast, high-quality Markdown conversion
             """)
         
         # Enhanced preview logic for PDFs: show the selected page and slider
@@ -898,7 +1040,7 @@ def build_blocks(theme):
         
         def toggle_ocr_engine(engine):
             """Show/hide controls based on selected OCR engine."""
-            if engine == "PaddleOCR-VL":
+            if engine in ["PaddleOCR-VL", "Gemini Flash 2.5"]:
                 return (
                     gr.update(visible=False),  # mode
                     gr.update(visible=False),  # task
@@ -938,6 +1080,16 @@ def build_blocks(theme):
                     text, md, raw, img, crops = process_image_paddleocrvl(image)
                 elif fp:
                     text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="PaddleOCR-VL")
+                else:
+                    return "Error uploading file or image", "", "", None, [], None, None, None
+            elif ocr_engine_val == "Gemini Flash 2.5":
+                # Gemini processing
+                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                    text, md, raw, img, crops = process_pdf_all_gemini(fp, dpi=int(dpi_val), page_range_text=page_range_text, insert_separators=sep_pages)
+                elif image is not None:
+                    text, md, raw, img, crops = process_image_gemini(image)
+                elif fp:
+                    text, md, raw, img, crops = process_pdf_all_gemini(fp, dpi=int(dpi_val), page_range_text=page_range_text, insert_separators=sep_pages)
                 else:
                     return "Error uploading file or image", "", "", None, [], None, None, None
             else:
