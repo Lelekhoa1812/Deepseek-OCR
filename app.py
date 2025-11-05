@@ -75,7 +75,7 @@ def verify_gpu_access():
     except Exception:
         return False
 
-def wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1):
+def wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1):
     """Wait for GPU to become available and move model to GPU.
     For ZeroGPU, the GPU may take time to attach after entering @spaces.GPU() context.
     Returns True if model is on GPU, False otherwise.
@@ -312,7 +312,7 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     # Wait for GPU and move model (ZeroGPU may take time to attach)
     # Since we're in @spaces.GPU() context, assume GPU will become available
     logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
     
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
@@ -430,7 +430,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
     # Wait for GPU and move model (ZeroGPU may take time to attach)
     # Since we're in @spaces.GPU() context, assume GPU will become available
     logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
     
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
@@ -506,7 +506,7 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
     # Wait for GPU and move model (ZeroGPU may take time to attach)
     # Since we're in @spaces.GPU() context, assume GPU will become available
     logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
-    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=60, retry_interval=1)
     
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
