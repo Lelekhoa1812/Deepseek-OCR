@@ -92,6 +92,7 @@ def wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1):
     attempts = 0
     while time.time() - start_time < max_wait_seconds:
         attempts += 1
+        elapsed = time.time() - start_time
         try:
             # Try to verify GPU access
             if verify_gpu_access():
@@ -101,17 +102,20 @@ def wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1):
                     # Verify it actually moved
                     new_device = next(model.parameters()).device
                     if new_device.type == 'cuda':
-                        logger.info(f"Model moved to GPU after {attempts} attempts: {new_device}")
+                        logger.info(f"Model moved to GPU after {attempts} attempts ({elapsed:.1f}s): {new_device}")
                         return True
                 except Exception as e:
-                    logger.warning(f"Attempt {attempts}: Failed to move model to GPU: {e}")
+                    logger.debug(f"Attempt {attempts}: Failed to move model to GPU: {e}")
             else:
-                logger.debug(f"Attempt {attempts}: GPU not yet accessible, waiting...")
+                logger.debug(f"Attempt {attempts} ({elapsed:.1f}s): GPU not yet accessible, waiting...")
         except Exception as e:
             logger.debug(f"Attempt {attempts}: GPU check failed: {e}")
         
-        if attempts < max_wait_seconds // retry_interval:
+        # Sleep before next attempt, but check if we have time left
+        if time.time() - start_time < max_wait_seconds - retry_interval:
             time.sleep(retry_interval)
+        else:
+            break  # Not enough time for another attempt
     
     # Final check
     device = next(model.parameters()).device
