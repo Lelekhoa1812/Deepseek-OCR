@@ -736,7 +736,7 @@ def render_pdf_page(file_path, page_number, dpi_value):
 def build_blocks(theme):
     with gr.Blocks(theme=theme, title="DeepSeek-OCR") as demo:
         gr.Markdown("""
-        # DeepSeek-OCR WebUI
+        # OCR-VLs WebUI
         **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes.**
         """)
         
