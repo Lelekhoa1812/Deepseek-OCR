@@ -62,6 +62,19 @@ warnings.filterwarnings('ignore', message='.*get_max_cache.*deprecated.*')
 warnings.filterwarnings('ignore', message='.*position_ids.*position_embeddings.*')
 warnings.filterwarnings('ignore', message='.*do_sample.*temperature.*')
 
+def verify_gpu_access():
+    """Verify that GPU is actually accessible by creating a test tensor."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        # Try to create a tensor on GPU to verify actual access
+        test_tensor = torch.zeros(1, device='cuda')
+        del test_tensor
+        torch.cuda.empty_cache()
+        return True
+    except Exception:
+        return False
+
 flash_ok = ensure_flash_attn_if_cuda()
 try:
     model = AutoModel.from_pretrained(
@@ -71,11 +84,16 @@ try:
         trust_remote_code=True,
         use_safetensors=True,
     )
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and verify_gpu_access():
         model = model.eval().cuda()
-        logger.info(f"Model loaded on GPU (CUDA available: {torch.cuda.is_available()})")
+        # Verify model actually ended up on GPU
+        actual_device = next(model.parameters()).device
+        if actual_device.type == 'cuda':
+            logger.info(f"Model loaded on GPU: {actual_device}")
+        else:
+            raise RuntimeError(f"Model failed to load on GPU. Device: {actual_device}")
     else:
-        raise RuntimeError("CUDA not available; cannot use flash attention")
+        raise RuntimeError("CUDA not available or GPU not accessible; cannot use flash attention")
 except Exception as e:
     logger.warning(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
     model = AutoModel.from_pretrained(
@@ -83,12 +101,22 @@ except Exception as e:
         trust_remote_code=True,
         use_safetensors=True,
     )
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = model.to(device).eval()
-    if device == 'cpu':
-        logger.warning("Model loaded on CPU - this may cause performance issues and 'No text in PDF' errors. GPU is required for proper operation.")
+    # Try GPU first, fallback to CPU
+    if torch.cuda.is_available() and verify_gpu_access():
+        try:
+            model = model.to('cuda').eval()
+            actual_device = next(model.parameters()).device
+            if actual_device.type == 'cuda':
+                logger.info(f"Model loaded on GPU: {actual_device}")
+            else:
+                raise RuntimeError("Failed to move model to GPU")
+        except Exception as e2:
+            logger.warning(f"Failed to load on GPU ({e2}), falling back to CPU")
+            model = model.to('cpu').eval()
+            logger.warning("Model loaded on CPU - this may cause performance issues and 'No text in PDF' errors. GPU is required for proper operation.")
     else:
-        logger.info(f"Model loaded on {device}")
+        model = model.to('cpu').eval()
+        logger.warning("Model loaded on CPU - this may cause performance issues and 'No text in PDF' errors. GPU is required for proper operation.")
 
 # Configure tokenizer after model is loaded
 try:
@@ -234,10 +262,21 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     # Check GPU availability before processing
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    logger.info(f"Processing image - Device: {device.type}, CUDA available: {cuda_available}")
+    gpu_accessible = verify_gpu_access()
+    logger.info(f"Processing image - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
     
-    if device.type == 'cpu' or not cuda_available:
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}"
+    # If model is on CPU but GPU is accessible, try to move it
+    if device.type == 'cpu' and gpu_accessible:
+        try:
+            model.cuda()
+            device = next(model.parameters()).device
+            logger.info(f"Model moved to GPU: {device}")
+        except Exception as e:
+            logger.warning(f"Failed to move model to GPU: {e}")
+    
+    # Final check: if still on CPU, error
+    if device.type == 'cpu':
+        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
         logger.error(error_msg)
         return error_msg, "", "", None, []
     
@@ -347,10 +386,21 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
     # Check GPU availability before starting
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}")
+    gpu_accessible = verify_gpu_access()
+    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
     
-    if device.type == 'cpu' or not cuda_available:
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}"
+    # If model is on CPU but GPU is accessible, try to move it
+    if device.type == 'cpu' and gpu_accessible:
+        try:
+            model.cuda()
+            device = next(model.parameters()).device
+            logger.info(f"Model moved to GPU: {device}")
+        except Exception as e:
+            logger.warning(f"Failed to move model to GPU: {e}")
+    
+    # Final check: if still on CPU, error
+    if device.type == 'cpu':
+        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
         logger.error(error_msg)
         doc.close()
         return (error_msg, error_msg, error_msg, None, [])
@@ -418,10 +468,21 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
     # Check GPU availability before processing
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}")
+    gpu_accessible = verify_gpu_access()
+    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
     
-    if device.type == 'cpu' or not cuda_available:
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}"
+    # If model is on CPU but GPU is accessible, try to move it
+    if device.type == 'cpu' and gpu_accessible:
+        try:
+            model.cuda()
+            device = next(model.parameters()).device
+            logger.info(f"Model moved to GPU: {device}")
+        except Exception as e:
+            logger.warning(f"Failed to move model to GPU: {e}")
+    
+    # Final check: if still on CPU, error
+    if device.type == 'cpu':
+        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
         logger.error(error_msg)
         return (error_msg, error_msg, error_msg, None, [])
     
