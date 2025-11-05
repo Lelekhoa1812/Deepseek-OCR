@@ -44,9 +44,9 @@ except ImportError:
 
 # Gemini imports (optional)
 try:
-    import google as genai
+    import google.generativeai as genai
     GEMINI_AVAILABLE = True
-except Exception:
+            except Exception:
     GEMINI_AVAILABLE = False
     warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
 
@@ -68,14 +68,14 @@ def _get_next_gemini_key():
     with _gemini_lock:
         return next(_gemini_cycle)
 
-# Allow overriding model via env, default to a stable flash model
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Allow overriding model via env, default to a stable flash model with fallback
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 # Set padding side early
-tokenizer.padding_side = 'right'
+    tokenizer.padding_side = 'right'
  
 def ensure_flash_attn_if_cuda():
     # Only attempt install when CUDA is available
@@ -165,14 +165,8 @@ KEY_TO_MODE_LABEL = {v: k for k, v in MODE_LABEL_TO_KEY.items()}
 # PaddleOCR-VL is a document parsing model that doesn't need language-specific configs
 # It uses a single pipeline for all languages
 
-# Initialize PaddleOCR-VL pipeline
+# Defer PaddleOCR-VL pipeline init until first use to avoid startup errors on some builds
 paddleocrvl_pipeline = None
-if PADDLEOCRVL_AVAILABLE:
-    try:
-        paddleocrvl_pipeline = PaddleOCRVL()
-    except Exception as e:
-        warnings.warn(f"Failed to initialize PaddleOCR-VL: {e}")
-        PADDLEOCRVL_AVAILABLE = False
 
 TASK_PROMPTS = {
     "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
@@ -286,7 +280,11 @@ def process_image_gemini(image: Image.Image):
 
     try:
         genai.configure(api_key=key)
-        model = genai.GenerativeModel(GEMINI_MODEL)
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+        except Exception:
+            # Fallback for users who configured an unsupported model name
+            model = genai.GenerativeModel("gemini-1.5-flash")
         img_bytes = _image_to_jpeg_bytes(image)
         system_prompt = _build_gemini_system_prompt()
         resp = model.generate_content([
@@ -335,8 +333,8 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     sys.stdout = StringIO()
     
     try:
-        model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
-                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+    model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
+                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
     except Exception as e:
         sys.stdout = stdout
         os.unlink(tmp.name)
@@ -418,8 +416,8 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         stdout2 = sys.stdout
         sys.stdout = StringIO()
         try:
-            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
-                        base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
         except Exception:
             pass
         
@@ -463,8 +461,16 @@ def process_image_paddleocrvl(image, prompt=None):
     if image is None:
         return " Error Upload image", "", "", None, []
     
-    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None:
+    # Lazy init to avoid import-time errors on some environments
+    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE
+    if not PADDLEOCRVL_AVAILABLE:
         return " PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'", "", "", None, []
+    if paddleocrvl_pipeline is None:
+        try:
+            paddleocrvl_pipeline = PaddleOCRVL()
+        except Exception as e:
+            PADDLEOCRVL_AVAILABLE = False
+            return f" PaddleOCR-VL init failed: {e}", "", "", None, []
     
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
@@ -610,7 +616,7 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
                 text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
                 # If we got a result (even if it's "No text"), break the retry loop
                 if text is not None:
-                    break
+                break
                 # If we got None or empty, retry
                 attempt += 1
                 if attempt >= max_retries:
@@ -877,10 +883,10 @@ def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_rang
         else:
             return process_image_paddleocrvl(Image.open(path))
     else:
-        if path.lower().endswith('.pdf'):
-            return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
-        else:
-            return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
+    if path.lower().endswith('.pdf'):
+        return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
+    else:
+        return process_image(Image.open(path), mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
 
 def toggle_prompt(task_label):
     if task_label == "Custom":
@@ -924,7 +930,7 @@ def render_pdf_page(file_path, page_number, dpi_value):
         return None
 
 def build_blocks(theme):
-    with gr.Blocks(theme=theme, title="DeepSeek-OCR") as demo:
+    with gr.Blocks(theme=theme, title="OCR-VLs") as demo:
         gr.Markdown("""
         # OCR-VLs WebUI
         **Convert documents to markdown, extract raw text, and locate specific content with bounding boxes.**
@@ -1074,7 +1080,7 @@ def build_blocks(theme):
             # Route to appropriate OCR engine
             if ocr_engine_val == "PaddleOCR-VL":
                 # PaddleOCR-VL processing
-                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+            if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
                     text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="PaddleOCR-VL")
                 elif image is not None:
                     text, md, raw, img, crops = process_image_paddleocrvl(image)
@@ -1096,12 +1102,12 @@ def build_blocks(theme):
                 # DeepSeekOCR processing
                 if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
                     text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR")
-                elif image is not None:
-                    text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
-                elif fp:
+            elif image is not None:
+                text, md, raw, img, crops = process_image(image, mode_label, task_label, custom_prompt, embed_figures=embed, high_accuracy=hiacc)
+            elif fp:
                     text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="DeepSeekOCR")
-                else:
-                    return "Error uploading file or image", "", "", None, [], None, None, None
+            else:
+                return "Error uploading file or image", "", "", None, [], None, None, None
 
             # Create temp files for download
             md_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".md")
