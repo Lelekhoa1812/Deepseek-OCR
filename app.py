@@ -46,7 +46,7 @@ except ImportError:
 try:
     import google.generativeai as genai
     GEMINI_AVAILABLE = True
-            except Exception:
+except Exception:
     GEMINI_AVAILABLE = False
     warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
 
@@ -75,7 +75,7 @@ MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 # Set padding side early
-    tokenizer.padding_side = 'right'
+tokenizer.padding_side = 'right'
  
 def ensure_flash_attn_if_cuda():
     # Only attempt install when CUDA is available
