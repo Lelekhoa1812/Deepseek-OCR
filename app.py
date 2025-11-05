@@ -21,21 +21,6 @@ import zipfile
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-# Ensure pad token and padding side to avoid attention mask warnings
-try:
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token is not None:
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
-            # Resize embeddings if special token was newly added
-            try:
-                model.resize_token_embeddings(len(tokenizer))
-            except Exception:
-                pass
-    tokenizer.padding_side = 'right'
-except Exception:
-    pass
  
 def ensure_flash_attn_if_cuda():
     # Only attempt install when CUDA is available
@@ -56,6 +41,16 @@ def ensure_flash_attn_if_cuda():
         return True
     except Exception:
         return False
+# Suppress specific transformers warnings that are expected
+warnings.filterwarnings('ignore', category=UserWarning, module='transformers.generation.configuration_utils')
+warnings.filterwarnings('ignore', message='.*pad_token_id.*eos_token_id.*')
+warnings.filterwarnings('ignore', message='.*attention mask.*pad token id.*')
+warnings.filterwarnings('ignore', message='.*attention mask.*cannot be inferred.*')
+warnings.filterwarnings('ignore', message='.*seen_tokens.*deprecated.*')
+warnings.filterwarnings('ignore', message='.*get_max_cache.*deprecated.*')
+warnings.filterwarnings('ignore', message='.*position_ids.*position_embeddings.*')
+warnings.filterwarnings('ignore', message='.*do_sample.*temperature.*')
+
 flash_ok = ensure_flash_attn_if_cuda()
 try:
     model = AutoModel.from_pretrained(
@@ -78,6 +73,33 @@ except Exception as e:
     )
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = model.to(device).eval()
+
+# Configure tokenizer after model is loaded
+try:
+    if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is not None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+            tokenizer.pad_token = tokenizer.eos_token
+        else:
+            # Add a pad token if eos_token is also None
+            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+            # Resize model embeddings if needed
+            if hasattr(model, 'resize_token_embeddings'):
+                try:
+                    model.resize_token_embeddings(len(tokenizer))
+                except Exception:
+                    pass
+    tokenizer.padding_side = 'right'
+    
+    # Try to set pad_token_id in model's generation config if available
+    if hasattr(model, 'generation_config'):
+        if hasattr(model.generation_config, 'pad_token_id') and model.generation_config.pad_token_id is None:
+            model.generation_config.pad_token_id = tokenizer.pad_token_id
+        if hasattr(model.generation_config, 'eos_token_id') and model.generation_config.eos_token_id is None:
+            model.generation_config.eos_token_id = tokenizer.eos_token_id
+except Exception as e:
+    # Silently continue if configuration fails
+    pass
 
 MODEL_CONFIGS = {
     "Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
