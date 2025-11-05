@@ -9,3 +9,4 @@ torchvision
 PyMuPDF
 hf_transfer
 paddleocr[doc-parser]
+paddlepaddle>=2.6.0,<3

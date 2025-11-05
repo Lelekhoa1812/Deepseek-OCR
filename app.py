@@ -383,8 +383,13 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     
     return cleaned, markdown, result, img_out, crops
 
-def process_image_paddleocrvl(image):
-    """Process image using PaddleOCR-VL and return results in Markdown format."""
+def process_image_paddleocrvl(image, prompt=None):
+    """Process image using PaddleOCR-VL and return results in Markdown format.
+    
+    Args:
+        image: PIL Image to process
+        prompt: Optional custom prompt. If None, uses default document parsing prompt.
+    """
     if image is None:
         return " Error Upload image", "", "", None, []
     
@@ -401,8 +406,35 @@ def process_image_paddleocrvl(image):
     tmp.close()
     
     try:
-        # Use PaddleOCR-VL to process the image
-        output = paddleocrvl_pipeline.predict(tmp.name)
+        # Try different approaches based on PaddleOCR-VL API
+        # First, try the simple predict method
+        try:
+            if prompt:
+                # If custom prompt is provided, try to use it with structured messages
+                # Format: PaddleOCR-VL might accept messages with image and text
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": tmp.name},
+                            {"type": "text", "text": prompt}
+                        ]
+                    }
+                ]
+                # Try if the pipeline has a chat or generate method
+                if hasattr(paddleocrvl_pipeline, 'chat'):
+                    output = paddleocrvl_pipeline.chat(messages)
+                elif hasattr(paddleocrvl_pipeline, 'generate'):
+                    output = paddleocrvl_pipeline.generate(messages)
+                else:
+                    # Fallback to predict with just image
+                    output = paddleocrvl_pipeline.predict(tmp.name)
+            else:
+                # Default: use predict with just image (document parsing mode)
+                output = paddleocrvl_pipeline.predict(tmp.name)
+        except (TypeError, AttributeError):
+            # If structured messages don't work, fallback to simple predict
+            output = paddleocrvl_pipeline.predict(tmp.name)
         
         if not output or len(output) == 0:
             os.unlink(tmp.name)
@@ -415,22 +447,47 @@ def process_image_paddleocrvl(image):
         text_results = []
         raw_results = []
         
-        for res in output:
-            try:
-                # Save markdown output
-                res.save_to_markdown(save_path=out_dir)
-                # Find the markdown file
-                md_files = [f for f in os.listdir(out_dir) if f.endswith('.md')]
-                if md_files:
-                    md_path = os.path.join(out_dir, md_files[0])
-                    with open(md_path, 'r', encoding='utf-8') as f:
-                        markdown_content = f.read()
-                        markdown_results.append(markdown_content)
-                        # Extract text from markdown (simple extraction)
-                        text_results.append(markdown_content)
+        # Handle different output types
+        if isinstance(output, str):
+            # Direct string output
+            markdown_results.append(output)
+            text_results.append(output)
+            raw_results.append("PaddleOCR-VL direct output")
+        elif isinstance(output, list):
+            # List of results
+            for res in output:
+                try:
+                    if isinstance(res, str):
+                        # String result
+                        markdown_results.append(res)
+                        text_results.append(res)
+                        raw_results.append("PaddleOCR-VL result")
+                    elif hasattr(res, 'save_to_markdown'):
+                        # Object with save_to_markdown method
+                        res.save_to_markdown(save_path=out_dir)
+                        # Find the markdown file
+                        md_files = [f for f in os.listdir(out_dir) if f.endswith('.md')]
+                        if md_files:
+                            md_path = os.path.join(out_dir, md_files[0])
+                            with open(md_path, 'r', encoding='utf-8') as f:
+                                markdown_content = f.read()
+                                markdown_results.append(markdown_content)
+                                text_results.append(markdown_content)
+                                raw_results.append(f"PaddleOCR-VL result: {str(res)}")
+                            # Remove the file to avoid conflicts
+                            os.remove(md_path)
+                    else:
+                        # Try to convert to string
+                        markdown_results.append(str(res))
+                        text_results.append(str(res))
                         raw_results.append(f"PaddleOCR-VL result: {str(res)}")
-            except Exception as e:
-                warnings.warn(f"Failed to process PaddleOCR-VL result: {e}")
+                except Exception as e:
+                    warnings.warn(f"Failed to process PaddleOCR-VL result: {e}")
+        else:
+            # Try to convert to string
+            markdown_results.append(str(output))
+            text_results.append(str(output))
+            raw_results.append(f"PaddleOCR-VL result: {str(output)}")
         
         # Clean up temp directory
         shutil.rmtree(out_dir, ignore_errors=True)
@@ -459,6 +516,9 @@ def process_image_paddleocrvl(image):
     
     except Exception as e:
         os.unlink(tmp.name)
+        import traceback
+        error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+        warnings.warn(error_msg)
         return f"Error: {str(e)}", "", "", None, []
 
 @spaces.GPU(duration=120)
@@ -478,11 +538,21 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
         while True:
             try:
                 text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
-                break
-            except Exception:
+                # If we got a result (even if it's "No text"), break the retry loop
+                if text is not None:
+                    break
+                # If we got None or empty, retry
                 attempt += 1
                 if attempt >= max_retries:
                     text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+            except Exception as e:
+                attempt += 1
+                if attempt >= max_retries:
+                    error_msg = f"Error processing page {i+1}: {str(e)}"
+                    text, md, raw, crops = error_msg, f"<!-- {error_msg} -->", error_msg, []
+                    warnings.warn(error_msg)
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         
