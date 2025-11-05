@@ -22,6 +22,16 @@ import functools
 from queue import Queue
 from threading import Event, Thread
 
+# Suppress transformers warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", message=".*attention mask.*")
+warnings.filterwarnings("ignore", message=".*pad token.*")
+warnings.filterwarnings("ignore", message=".*seen_tokens.*")
+warnings.filterwarnings("ignore", message=".*get_max_cache.*")
+warnings.filterwarnings("ignore", message=".*position_ids.*")
+warnings.filterwarnings("ignore", message=".*position_embeddings.*")
+warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
+
 # PaddleOCR-VL imports
 try:
     from paddleocr import PaddleOCRVL
@@ -87,13 +97,20 @@ try:
         else:
             # Add a new pad token
             tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
-            model.resize_token_embeddings(len(tokenizer))
+            try:
+                model.resize_token_embeddings(len(tokenizer))
+            except Exception:
+                pass
     # Ensure model config has pad_token_id set
     if hasattr(model, 'config'):
         if model.config.pad_token_id is None:
             model.config.pad_token_id = tokenizer.pad_token_id
+        # Also set pad_token_id in generation config if it exists
+        if hasattr(model.config, 'generation_config') and hasattr(model.config.generation_config, 'pad_token_id'):
+            if model.config.generation_config.pad_token_id is None:
+                model.config.generation_config.pad_token_id = tokenizer.pad_token_id
 except Exception as e:
-    warnings.warn(f"Failed to configure pad token: {e}")
+    pass  # Suppress warnings for pad token configuration
 
 MODEL_CONFIGS = {
     "Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
@@ -247,12 +264,59 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     stdout = sys.stdout
     sys.stdout = StringIO()
     
-    model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
-                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+    try:
+        model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
+                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+    except Exception as e:
+        sys.stdout = stdout
+        os.unlink(tmp.name)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        warnings.warn(f"Inference error: {e}")
+        return f"Inference error: {str(e)}", "", "", None, []
     
-    result = '\n'.join([l for l in sys.stdout.getvalue().split('\n') 
-                        if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+    # Get result from stdout
+    stdout_output = sys.stdout.getvalue()
     sys.stdout = stdout
+    
+    # Filter stdout output
+    result = '\n'.join([l for l in stdout_output.split('\n') 
+                        if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size', 'torch.cuda', 'loading', 'INFO:', 'WARNING:', 'ERROR:'])]).strip()
+    
+    # Also check output directory for markdown/text files
+    if os.path.exists(out_dir):
+        # Look for markdown files first
+        md_files = sorted([f for f in os.listdir(out_dir) if f.endswith('.md')])
+        txt_files = sorted([f for f in os.listdir(out_dir) if f.endswith('.txt')])
+        
+        # Read markdown files if available
+        if md_files:
+            file_contents = []
+            for md_file in md_files:
+                md_path = os.path.join(out_dir, md_file)
+                try:
+                    with open(md_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            file_contents.append(content)
+                except Exception as e:
+                    warnings.warn(f"Failed to read {md_path}: {e}")
+            if file_contents:
+                result = '\n\n'.join(file_contents) if not result else result + '\n\n' + '\n\n'.join(file_contents)
+        
+        # Fallback to text files if no markdown
+        elif txt_files and not result:
+            file_contents = []
+            for txt_file in txt_files:
+                txt_path = os.path.join(out_dir, txt_file)
+                try:
+                    with open(txt_path, 'r', encoding='utf-8') as f:
+                        content = f.read().strip()
+                        if content:
+                            file_contents.append(content)
+                except Exception:
+                    pass
+            if file_contents:
+                result = '\n\n'.join(file_contents)
     
     os.unlink(tmp.name)
     shutil.rmtree(out_dir, ignore_errors=True)
@@ -283,11 +347,32 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         out_dir2 = tempfile.mkdtemp()
         stdout2 = sys.stdout
         sys.stdout = StringIO()
-        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
-                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
-        refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
-                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+        try:
+            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                        base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        except Exception:
+            pass
+        
+        stdout_output2 = sys.stdout.getvalue()
         sys.stdout = stdout2
+        
+        refine_result = '\n'.join([l for l in stdout_output2.split('\n')
+                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size', 'torch.cuda', 'loading', 'INFO:', 'WARNING:', 'ERROR:'])]).strip()
+        
+        # Check output directory for refine results
+        if os.path.exists(out_dir2):
+            md_files2 = sorted([f for f in os.listdir(out_dir2) if f.endswith('.md')])
+            if md_files2:
+                for md_file in md_files2:
+                    md_path2 = os.path.join(out_dir2, md_file)
+                    try:
+                        with open(md_path2, 'r', encoding='utf-8') as f:
+                            content2 = f.read().strip()
+                            if content2:
+                                refine_result = content2 if not refine_result else refine_result + '\n\n' + content2
+                    except Exception:
+                        pass
+        
         os.unlink(tmp2.name)
         shutil.rmtree(out_dir2, ignore_errors=True)
         if refine_result:
@@ -401,11 +486,17 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         
-        if text and text != "No text":
+        # Check for valid text results (not empty, not error messages, not "No text")
+        if text and text.strip() and text != "No text" and not text.startswith("Error") and not text.startswith(" "):
             texts.append(f"### Page {i + 1}\n\n{text}")
             markdowns.append(f"### Page {i + 1}\n\n{md}")
             raws.append(f"=== Page {i + 1} ===\n{raw}")
             all_crops.extend(crops)
+        elif text and (text.startswith("Error") or text.startswith("Inference error")):
+            # Include error messages in output for debugging
+            texts.append(f"### Page {i + 1}\n\n{text}")
+            markdowns.append(f"### Page {i + 1}\n\n<!-- {text} -->")
+            raws.append(f"=== Page {i + 1} ===\n{text}")
     
     doc.close()
     
