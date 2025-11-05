@@ -75,6 +75,52 @@ def verify_gpu_access():
     except Exception:
         return False
 
+def wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1):
+    """Wait for GPU to become available and move model to GPU.
+    For ZeroGPU, the GPU may take time to attach after entering @spaces.GPU() context.
+    Returns True if model is on GPU, False otherwise.
+    """
+    device = next(model.parameters()).device
+    if device.type == 'cuda':
+        return True
+    
+    if not torch.cuda.is_available():
+        return False
+    
+    # Wait for GPU to become accessible with retries
+    start_time = time.time()
+    attempts = 0
+    while time.time() - start_time < max_wait_seconds:
+        attempts += 1
+        try:
+            # Try to verify GPU access
+            if verify_gpu_access():
+                # GPU is accessible, try to move model
+                try:
+                    model.cuda()
+                    # Verify it actually moved
+                    new_device = next(model.parameters()).device
+                    if new_device.type == 'cuda':
+                        logger.info(f"Model moved to GPU after {attempts} attempts: {new_device}")
+                        return True
+                except Exception as e:
+                    logger.warning(f"Attempt {attempts}: Failed to move model to GPU: {e}")
+            else:
+                logger.debug(f"Attempt {attempts}: GPU not yet accessible, waiting...")
+        except Exception as e:
+            logger.debug(f"Attempt {attempts}: GPU check failed: {e}")
+        
+        if attempts < max_wait_seconds // retry_interval:
+            time.sleep(retry_interval)
+    
+    # Final check
+    device = next(model.parameters()).device
+    if device.type == 'cuda':
+        return True
+    
+    logger.warning(f"GPU not available after {max_wait_seconds}s wait. Model remains on {device}")
+    return False
+
 flash_ok = ensure_flash_attn_if_cuda()
 try:
     model = AutoModel.from_pretrained(
@@ -259,24 +305,18 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         logger.warning("Custom prompt not provided")
         return "Enter prompt", "", "", None, []
     
-    # Check GPU availability before processing
+    # Wait for GPU and move model (ZeroGPU may take time to attach)
+    # Since we're in @spaces.GPU() context, assume GPU will become available
+    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    gpu_accessible = verify_gpu_access()
-    logger.info(f"Processing image - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
+    logger.info(f"Processing image - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
     
-    # If model is on CPU but GPU is accessible, try to move it
-    if device.type == 'cpu' and gpu_accessible:
-        try:
-            model.cuda()
-            device = next(model.parameters()).device
-            logger.info(f"Model moved to GPU: {device}")
-        except Exception as e:
-            logger.warning(f"Failed to move model to GPU: {e}")
-    
-    # Final check: if still on CPU, error
+    # Only error if GPU is still not ready after waiting
     if device.type == 'cpu':
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
+        error_msg = f"Error: GPU not available after waiting. Model is on CPU. ZeroGPU may not be attached or quota limit reached. Current device: {device.type}, CUDA available: {cuda_available}"
         logger.error(error_msg)
         return error_msg, "", "", None, []
     
@@ -383,24 +423,18 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
     if page_indices is None:
         page_indices = list(range(len(doc)))
     
-    # Check GPU availability before starting
+    # Wait for GPU and move model (ZeroGPU may take time to attach)
+    # Since we're in @spaces.GPU() context, assume GPU will become available
+    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    gpu_accessible = verify_gpu_access()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
+    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
     
-    # If model is on CPU but GPU is accessible, try to move it
-    if device.type == 'cpu' and gpu_accessible:
-        try:
-            model.cuda()
-            device = next(model.parameters()).device
-            logger.info(f"Model moved to GPU: {device}")
-        except Exception as e:
-            logger.warning(f"Failed to move model to GPU: {e}")
-    
-    # Final check: if still on CPU, error
+    # Only error if GPU is still not ready after waiting
     if device.type == 'cpu':
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
+        error_msg = f"Error: GPU not available after waiting. Model is on CPU. ZeroGPU may not be attached or quota limit reached. Current device: {device.type}, CUDA available: {cuda_available}"
         logger.error(error_msg)
         doc.close()
         return (error_msg, error_msg, error_msg, None, [])
@@ -465,24 +499,18 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
     doc.close()
     logger.info(f"PDF has {total_pages} pages")
     
-    # Check GPU availability before processing
+    # Wait for GPU and move model (ZeroGPU may take time to attach)
+    # Since we're in @spaces.GPU() context, assume GPU will become available
+    logger.info("Waiting for GPU to become available (ZeroGPU may take time to attach)...")
+    gpu_ready = wait_for_gpu_and_move_model(max_wait_seconds=30, retry_interval=1)
+    
     device = next(model.parameters()).device
     cuda_available = torch.cuda.is_available()
-    gpu_accessible = verify_gpu_access()
-    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}")
+    logger.info(f"PDF processing - Device: {device.type}, CUDA available: {cuda_available}, GPU ready: {gpu_ready}")
     
-    # If model is on CPU but GPU is accessible, try to move it
-    if device.type == 'cpu' and gpu_accessible:
-        try:
-            model.cuda()
-            device = next(model.parameters()).device
-            logger.info(f"Model moved to GPU: {device}")
-        except Exception as e:
-            logger.warning(f"Failed to move model to GPU: {e}")
-    
-    # Final check: if still on CPU, error
+    # Only error if GPU is still not ready after waiting
     if device.type == 'cpu':
-        error_msg = f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached). Current device: {device.type}, CUDA available: {cuda_available}, GPU accessible: {gpu_accessible}"
+        error_msg = f"Error: GPU not available after waiting. Model is on CPU. ZeroGPU may not be attached or quota limit reached. Current device: {device.type}, CUDA available: {cuda_available}"
         logger.error(error_msg)
         return (error_msg, error_msg, error_msg, None, [])
     
