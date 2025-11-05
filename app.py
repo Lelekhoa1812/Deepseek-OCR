@@ -416,7 +416,7 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         stdout2 = sys.stdout
         sys.stdout = StringIO()
         try:
-        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
                     base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
         except Exception:
             pass
