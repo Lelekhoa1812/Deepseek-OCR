@@ -213,6 +213,11 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     if task_label in ["Custom", "Locate"] and not custom_prompt.strip():
         return "Enter prompt", "", "", None, []
     
+    # Check GPU availability before processing
+    device = next(model.parameters()).device
+    if device.type == 'cpu':
+        return f"Error: GPU not available. Model is on CPU. Please wait for GPU to become available (ZeroGPU limit may be reached).", "", "", None, []
+    
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
     image = ImageOps.exif_transpose(image)
@@ -240,18 +245,23 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     stdout = sys.stdout
     sys.stdout = StringIO()
     
-    model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
-                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
-    
-    result = '\n'.join([l for l in sys.stdout.getvalue().split('\n') 
-                        if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
-    sys.stdout = stdout
-    
-    os.unlink(tmp.name)
-    shutil.rmtree(out_dir, ignore_errors=True)
+    try:
+        model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
+                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        
+        result = '\n'.join([l for l in sys.stdout.getvalue().split('\n') 
+                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+    except Exception as e:
+        result = ""
+        error_msg = f"Error during inference: {str(e)}"
+        warnings.warn(error_msg)
+    finally:
+        sys.stdout = stdout
+        os.unlink(tmp.name)
+        shutil.rmtree(out_dir, ignore_errors=True)
     
     if not result:
-        return "No text", "", "", None, []
+        return "No text extracted from image. This may occur if GPU is unavailable or inference failed.", "", "", None, []
     
     cleaned = clean_output(result, False, False)
     markdown = clean_output(result, True, True)
@@ -276,13 +286,18 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         out_dir2 = tempfile.mkdtemp()
         stdout2 = sys.stdout
         sys.stdout = StringIO()
-        model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
-                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
-        refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
-                            if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
-        sys.stdout = stdout2
-        os.unlink(tmp2.name)
-        shutil.rmtree(out_dir2, ignore_errors=True)
+        try:
+            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                        base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+            refine_result = '\n'.join([l for l in sys.stdout.getvalue().split('\n')
+                                if not any(s in l for s in ['image:', 'other:', 'PATCHES', '====', 'BASE:', '%|', 'torch.Size'])]).strip()
+        except Exception as e:
+            refine_result = ""
+            warnings.warn(f"High accuracy refinement failed: {str(e)}")
+        finally:
+            sys.stdout = stdout2
+            os.unlink(tmp2.name)
+            shutil.rmtree(out_dir2, ignore_errors=True)
         if refine_result:
             refined_md = clean_output(refine_result, embed_figures, True)
             # Prefer refined markdown if longer (heuristic)
@@ -308,19 +323,31 @@ def process_pdf(path, mode_label, task_label, custom_prompt, dpi=300, page_indic
         while True:
             try:
                 text, md, raw, _, crops = process_image(img, mode_label, task_label, custom_prompt, embed_figures=embed_figures, high_accuracy=high_accuracy)
+                # Check if we got an error message about GPU
+                if text and text.startswith("Error: GPU not available"):
+                    attempt = max_retries  # Force exit retry loop
+                    break
                 break
-            except Exception:
+            except Exception as e:
                 attempt += 1
                 if attempt >= max_retries:
-                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    error_detail = str(e) if str(e) else "Unknown error"
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after {max_retries} retries: {error_detail} -->", "", []
                     break
                 time.sleep(retry_backoff_seconds * attempt)
         
-        if text and text != "No text":
+        # Skip pages that failed or returned errors
+        if text and text != "No text" and not text.startswith("Error:"):
             texts.append(f"### Page {i + 1}\n\n{text}")
             markdowns.append(f"### Page {i + 1}\n\n{md}")
             raws.append(f"=== Page {i + 1} ===\n{raw}")
             all_crops.extend(crops)
+        elif text and text.startswith("Error: GPU not available"):
+            # If GPU error, add a note and stop processing
+            texts.append(f"### Page {i + 1}\n\n{text}")
+            markdowns.append(f"### Page {i + 1}\n\n{text}")
+            raws.append(f"=== Page {i + 1} ===\n{text}")
+            break  # Stop processing remaining pages
     
     doc.close()
     
@@ -384,6 +411,12 @@ def process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=300, page_r
         crops_all.extend(cropsx)
 
     sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    # Check if we got GPU errors
+    has_gpu_error = any("GPU not available" in txt for txt in texts_all) or any("GPU not available" in md for md in mds_all)
+    if has_gpu_error:
+        error_msg = "Error: GPU not available. ZeroGPU limit may be reached. Please wait and try again."
+        return (error_msg, error_msg, error_msg, None, crops_all)
+    
     return (sep.join(texts_all) if texts_all else "No text in PDF",
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
