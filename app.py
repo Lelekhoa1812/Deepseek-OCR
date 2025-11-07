@@ -46,9 +46,11 @@ except ImportError:
 # Gemini imports (optional)
 try:
     from google import genai
+    from google.genai import types
     GEMINI_AVAILABLE = True
 except Exception:
     GEMINI_AVAILABLE = False
+    types = None
     warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
 
 # Setup logger
@@ -86,16 +88,31 @@ class GeminiClient:
     def __init__(self, api_key: str):
         self.client = genai.Client(api_key=api_key)
     
-    def generate_content(self, contents, model: str = "gemini-2.5-flash", temperature: float = 0.7) -> str:
+    def generate_content(self, prompt: str, image_data: bytes = None, mime_type: str = "image/jpeg", model: str = "gemini-2.5-flash", temperature: float = 0.7) -> str:
         """Generate content using Gemini API
         
         Args:
-            contents: Can be a string prompt or a list of content parts (text and images)
+            prompt: Text prompt
+            image_data: Optional image bytes
+            mime_type: MIME type of the image (default: "image/jpeg")
             model: Model name to use
-            temperature: Temperature for generation (not used in current API but kept for compatibility)
+            temperature: Temperature for generation
         """
         try:
-            response = self.client.models.generate_content(model=model, contents=contents)
+            # Build parts list
+            parts = [types.Part(text=prompt)]
+            if image_data:
+                parts.append(types.Part(data=image_data, mime_type=mime_type))
+            
+            # Create Content object with role and parts
+            content = types.Content(role="user", parts=parts)
+            
+            # Generate content
+            response = self.client.models.generate_content(
+                model=model,
+                contents=[content],
+                temperature=temperature
+            )
             return response.text
         except Exception as e:
             logger.error(f"[LLM] ❌ Error calling Gemini API: {e}")
@@ -351,17 +368,21 @@ def process_image_gemini(image: Image.Image):
         img_bytes = _image_to_jpeg_bytes(image)
         system_prompt = _build_gemini_system_prompt()
         
-        # Prepare contents for the new API - can be a list with text and image
-        contents = [
-            system_prompt,
-            {"mime_type": "image/jpeg", "data": img_bytes},
-        ]
-        
         try:
-            md = client.generate_content(contents, model=GEMINI_MODEL)
+            md = client.generate_content(
+                prompt=system_prompt,
+                image_data=img_bytes,
+                mime_type="image/jpeg",
+                model=GEMINI_MODEL
+            )
         except Exception:
             # Fallback for users who configured an unsupported model name
-            md = client.generate_content(contents, model="gemini-2.5-flash")
+            md = client.generate_content(
+                prompt=system_prompt,
+                image_data=img_bytes,
+                mime_type="image/jpeg",
+                model="gemini-2.5-flash"
+            )
         
         md = (md or "").strip()
         if not md or md == "Error generating response from Gemini.":
