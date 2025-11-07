@@ -116,8 +116,7 @@ class GeminiClient:
             # Generate content
             response = self.client.models.generate_content(
                 model=model,
-                contents=[content],
-                temperature=temperature
+                contents=[content]
             )
             return response.text
         except Exception as e:
