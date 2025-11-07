@@ -23,6 +23,7 @@ from queue import Queue
 from threading import Event, Thread
 from threading import Lock
 from itertools import cycle
+import logging
 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
@@ -44,11 +45,19 @@ except ImportError:
 
 # Gemini imports (optional)
 try:
-    import google.generativeai as genai
+    from google import genai
     GEMINI_AVAILABLE = True
 except Exception:
     GEMINI_AVAILABLE = False
     warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
+
+# Setup logger
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.ERROR)
 
 # Gather Gemini API keys from environment and prepare round-robin iterator
 GEMINI_KEYS = [
@@ -69,7 +78,28 @@ def _get_next_gemini_key():
         return next(_gemini_cycle)
 
 # Allow overriding model via env, default to a stable flash model with fallback
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+class GeminiClient:
+    """Gemini API client for generating responses"""
+    
+    def __init__(self, api_key: str):
+        self.client = genai.Client(api_key=api_key)
+    
+    def generate_content(self, contents, model: str = "gemini-2.5-flash", temperature: float = 0.7) -> str:
+        """Generate content using Gemini API
+        
+        Args:
+            contents: Can be a string prompt or a list of content parts (text and images)
+            model: Model name to use
+            temperature: Temperature for generation (not used in current API but kept for compatibility)
+        """
+        try:
+            response = self.client.models.generate_content(model=model, contents=contents)
+            return response.text
+        except Exception as e:
+            logger.error(f"[LLM] ❌ Error calling Gemini API: {e}")
+            return "Error generating response from Gemini."
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
@@ -167,6 +197,7 @@ KEY_TO_MODE_LABEL = {v: k for k, v in MODE_LABEL_TO_KEY.items()}
 
 # Defer PaddleOCR-VL pipeline init until first use to avoid startup errors on some builds
 paddleocrvl_pipeline = None
+PADDLEOCRVL_ERROR_MESSAGE = None
 
 TASK_PROMPTS = {
     "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
@@ -316,21 +347,25 @@ def process_image_gemini(image: Image.Image):
         return " Gemini API keys not configured", "", "", None, []
 
     try:
-        genai.configure(api_key=key)
-        try:
-            model = genai.GenerativeModel(GEMINI_MODEL)
-        except Exception:
-            # Fallback for users who configured an unsupported model name
-            model = genai.GenerativeModel("gemini-1.5-flash")
+        client = GeminiClient(api_key=key)
         img_bytes = _image_to_jpeg_bytes(image)
         system_prompt = _build_gemini_system_prompt()
-        resp = model.generate_content([
+        
+        # Prepare contents for the new API - can be a list with text and image
+        contents = [
             system_prompt,
             {"mime_type": "image/jpeg", "data": img_bytes},
-        ])
-        md = (resp.text or "").strip()
-        if not md:
-            return "No text", "", "", None, []
+        ]
+        
+        try:
+            md = client.generate_content(contents, model=GEMINI_MODEL)
+        except Exception:
+            # Fallback for users who configured an unsupported model name
+            md = client.generate_content(contents, model="gemini-2.5-flash")
+        
+        md = (md or "").strip()
+        if not md or md == "Error generating response from Gemini.":
+            return "No text" if md != "Error generating response from Gemini." else md, "", "", None, []
         return md, md, md, None, []
     except Exception as e:
         return f"Error: {str(e)}", "", "", None, []
@@ -499,15 +534,17 @@ def process_image_paddleocrvl(image, prompt=None):
         return " Error Upload image", "", "", None, []
     
     # Lazy init to avoid import-time errors on some environments
-    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE
+    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE
     if not PADDLEOCRVL_AVAILABLE:
-        return " PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'", "", "", None, []
+        msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
+        return f" {msg}", "", "", None, []
     if paddleocrvl_pipeline is None:
         try:
             paddleocrvl_pipeline = PaddleOCRVL()
         except Exception as e:
             PADDLEOCRVL_AVAILABLE = False
-            return f" PaddleOCR-VL init failed: {e}", "", "", None, []
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL init failed: {e}"
+            return f" {PADDLEOCRVL_ERROR_MESSAGE}", "", "", None, []
     
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
@@ -840,6 +877,10 @@ def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=
 
 def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
     """Process PDF using PaddleOCR-VL."""
+    # Early exit if engine is unavailable
+    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None:
+        msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
+        return msg, f"<!-- {msg} -->", msg, None, []
     doc = fitz.open(path)
     texts, markdowns, raws, all_crops = [], [], [], []
     if page_indices is None:
@@ -888,6 +929,10 @@ def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=
 
 def process_pdf_all_paddleocrvl(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
     """Process all pages of PDF using PaddleOCR-VL."""
+    # Early exit if engine is unavailable
+    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None:
+        msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
+        return msg, f"<!-- {msg} -->", msg, None, []
     doc = fitz.open(path)
     total_pages = len(doc)
     doc.close()
