@@ -102,7 +102,13 @@ class GeminiClient:
             # Build parts list
             parts = [types.Part(text=prompt)]
             if image_data:
-                parts.append(types.Part(data=image_data, mime_type=mime_type))
+                # Use InlineData with Blob for image data
+                parts.append(types.Part(
+                    inline_data=types.Blob(
+                        mime_type=mime_type,
+                        data=image_data
+                    )
+                ))
             
             # Create Content object with role and parts
             content = types.Content(role="user", parts=parts)
