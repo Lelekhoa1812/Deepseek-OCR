@@ -6,6 +6,7 @@ colorTo: yellow
 sdk: gradio
 sdk_version: 5.49.1
 app_file: app.py
+python_version: 3.11
 pinned: true
 short_description: 'DeepSeek olm dots Paddle Gemini - OCR'
 ---
