@@ -127,7 +127,7 @@ except ImportError as e:
     import sys
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     if sys.version_info < (3, 11):
-        OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python 3.10.13, but you have Python {python_version}. Install manually: pip install git+https://github.com/allenai/olmocr.git"
+        OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python >=3.11, but you have Python {python_version}. For Hugging Face Spaces, create a runtime.txt file with 'python-3.11' or higher"
     else:
         OLMOCR_ERROR_MESSAGE = f"olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git. Error: {str(e)}"
     warnings.warn(OLMOCR_ERROR_MESSAGE)
@@ -812,7 +812,7 @@ def _init_olmocr_model():
     global olmocr_model, olmocr_processor, OLMOCR_AVAILABLE, OLMOCR_ERROR_MESSAGE
     
     if not OLMOCR_AVAILABLE:
-        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python 3.10.13)"
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.11)"
         raise RuntimeError(msg)
     
     if olmocr_model is None or olmocr_processor is None:
@@ -898,7 +898,7 @@ def process_image_olmocr(image, prompt=None):
     # Lazy init to avoid import-time errors
     global olmocr_model, olmocr_processor, OLMOCR_AVAILABLE, OLMOCR_ERROR_MESSAGE
     if not OLMOCR_AVAILABLE:
-        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python 3.10.13)"
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.11)"
         return f" {msg}", "", "", None, []
     
     try:
@@ -1463,7 +1463,7 @@ def process_pdf_olmocr(path, dpi=300, page_indices=None, insert_separators=True,
     """Process PDF using olmOCR."""
     # Early exit if engine is unavailable
     if not OLMOCR_AVAILABLE:
-        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.10.13)"
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.11)"
         return msg, f"<!-- {msg} -->", msg, None, []
     
     try:
@@ -1522,7 +1522,7 @@ def process_pdf_all_olmocr(path, dpi=300, page_range_text="", insert_separators=
     """Process all pages of PDF using olmOCR."""
     # Early exit if engine is unavailable
     if not OLMOCR_AVAILABLE:
-        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.10.13)"
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git (requires Python >=3.11)"
         return msg, f"<!-- {msg} -->", msg, None, []
     
     doc = fitz.open(path)
@@ -1827,7 +1827,7 @@ def build_blocks(theme):
             - **DeepSeekOCR**: AI-powered OCR with advanced document understanding and markdown conversion
             - **PaddleOCR-VL**: Document parsing model that converts documents to markdown format (install with: `pip install 'paddleocr[doc-parser]'`)
             - **Gemini Flash 2.5**: Google Gemini model for fast, high-quality Markdown conversion (set GEMINI_API_1..5 in .env)
-            - **olmOCR**: FP8 quantized vision-language model for document OCR (requires Python 3.10.13)
+            - **olmOCR**: FP8 quantized vision-language model for document OCR (requires Python >=3.11)
             - **dots.ocr**: Multilingual document parser with SOTA performance on layout detection and content recognition (install with: `pip install qwen-vl-utils`)
             
             ### DeepSeekOCR Modes
@@ -1853,7 +1853,7 @@ def build_blocks(theme):
             - Automatically converts documents to markdown format
             - Supports both images and PDFs
             - Model: allenai/olmOCR-2-7B-1025-FP8
-            - **Requires Python 3.10.13**
+            - **Requires Python >=3.11** - For Hugging Face Spaces, create a `runtime.txt` file with `python-3.11` or higher
             
             ### dots.ocr
             - Multilingual document parser based on 1.7B LLM with SOTA performance
