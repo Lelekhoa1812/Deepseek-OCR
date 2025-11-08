@@ -15,5 +15,5 @@ spaces
 google-genai>=0.7.0
 Pillow
 numpy
-olmocr
+git+https://github.com/allenai/olmocr.git
 qwen-vl-utils
