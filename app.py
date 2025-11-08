@@ -892,7 +892,7 @@ def _init_olmocr_model():
     
     if olmocr_model is None or olmocr_processor is None:
         try:
-            model_name = "allenai/olmOCR-2-7B-1025-FP8"
+            model_name = "allenai/olmOCR-2-7B-1025"
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             
             olmocr_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -2041,7 +2041,7 @@ def build_blocks(theme):
             - **DeepSeekOCR**: AI-powered OCR with advanced document understanding and markdown conversion
             - **PaddleOCR-VL**: Document parsing model that converts documents to markdown format (install with: `pip install 'paddleocr[doc-parser]'`)
             - **Gemini Flash 2.5**: Google Gemini model for fast, high-quality Markdown conversion (set GEMINI_API_1..5 in .env)
-            - **olmOCR**: FP8 quantized vision-language model for document OCR (requires Python >=3.11)
+            - **olmOCR**: Vision-language model for document OCR (requires Python >=3.11)
             - **dots.ocr**: Multilingual document parser with SOTA performance on layout detection and content recognition (install with: `pip install qwen-vl-utils`)
             
             ### DeepSeekOCR Modes
@@ -2063,10 +2063,10 @@ def build_blocks(theme):
             - Supports both images and PDFs
             
             ### olmOCR
-            - FP8 quantized vision-language model based on Qwen2.5-VL-7B-Instruct
+            - Vision-language model based on Qwen2.5-VL-7B-Instruct
             - Automatically converts documents to markdown format
             - Supports both images and PDFs
-            - Model: allenai/olmOCR-2-7B-1025-FP8
+            - Model: allenai/olmOCR-2-7B-1025
             - **Requires Python >=3.11** - For Hugging Face Spaces, create a `runtime.txt` file with `python-3.11` or higher
             
             ### dots.ocr
