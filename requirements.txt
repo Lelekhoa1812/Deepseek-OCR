@@ -16,5 +16,6 @@ spaces
 google-genai>=0.7.0
 Pillow
 numpy
-git+https://github.com/allenai/olmocr.git
+# olmocr requires Python >=3.11 - install conditionally in code if Python >=3.11
+# git+https://github.com/allenai/olmocr.git
 qwen-vl-utils

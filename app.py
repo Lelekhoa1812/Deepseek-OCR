@@ -117,6 +117,25 @@ OLMOCR_MODEL = None
 OLMOCR_PROCESSOR = None
 OLMOCR_ERROR_MESSAGE = None
 
+# Try to install olmocr conditionally if Python >= 3.11
+import sys
+if sys.version_info >= (3, 11):
+    try:
+        import olmocr
+    except ImportError:
+        # Try to install olmocr if not available
+        try:
+            import subprocess
+            subprocess.check_call([
+                sys.executable, '-m', 'pip', 'install', '--no-cache-dir', 
+                'git+https://github.com/allenai/olmocr.git'
+            ])
+            # Reload import after installation
+            import importlib
+            importlib.invalidate_caches()
+        except Exception as install_error:
+            warnings.warn(f"Failed to auto-install olmocr: {install_error}. You may need to install it manually: pip install git+https://github.com/allenai/olmocr.git")
+
 try:
     from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
     from olmocr.data.renderpdf import render_pdf_to_base64png
@@ -124,7 +143,6 @@ try:
     OLMOCR_AVAILABLE = True
 except ImportError as e:
     OLMOCR_AVAILABLE = False
-    import sys
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     if sys.version_info < (3, 11):
         OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python >=3.11, but you have Python {python_version}. For Hugging Face Spaces, create a runtime.txt file with 'python-3.11' or higher"
