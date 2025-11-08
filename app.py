@@ -895,35 +895,69 @@ def _init_dotsocr_model():
             except:
                 pass
             
-            dotsocr_model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                attn_implementation="flash_attention_2" if flash_attn_available else None,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
-                trust_remote_code=True
-            ).eval()
+            # Try loading with flash attention first, fallback to default if it fails
+            try:
+                dotsocr_model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    attn_implementation="flash_attention_2" if flash_attn_available else None,
+                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    trust_remote_code=True
+                ).eval()
+            except (ImportError, AttributeError) as e:
+                error_str = str(e)
+                # If flash attention fails (e.g., LlamaFlashAttention2 not available), try without it
+                if "LlamaFlashAttention2" in error_str or "flash_attention" in error_str.lower() or "cannot import name" in error_str:
+                    warnings.warn(f"Flash attention not available for dots.ocr, falling back to default attention: {error_str}")
+                    dotsocr_model = AutoModelForCausalLM.from_pretrained(
+                        model_path,
+                        attn_implementation=None,  # Use default attention
+                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                        device_map="auto" if torch.cuda.is_available() else None,
+                        trust_remote_code=True
+                    ).eval()
+                else:
+                    raise
             
             if not torch.cuda.is_available():
                 dotsocr_model.to(device)
             
-            dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            try:
+                dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+            except (ImportError, AttributeError) as e:
+                error_str = str(e)
+                if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                    # If processor loading fails due to flash attention, it's likely a transformers version issue
+                    DOTSOCR_AVAILABLE = False
+                    DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed. This may require a newer transformers version. Error: {error_str}"
+                    raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                else:
+                    raise
         except RuntimeError:
             # Re-raise RuntimeError as-is (from version check)
             raise
         except ImportError as e:
             error_str = str(e)
-            if "Qwen2_5_VLProcessor" in error_str or "cannot import name" in error_str:
+            if "Qwen2_5_VLProcessor" in error_str:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0 for Qwen2_5_VLProcessor. Current transformers version may be too old. Please upgrade: pip install transformers>=4.47.0. Error: {error_str}"
+            elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                # This error was already handled above, but if it reaches here, provide helpful message
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed due to flash attention compatibility issue. This may require a newer transformers version or disabling flash attention. Error: {error_str}"
             else:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {error_str}"
             raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
         except Exception as e:
             error_str = str(e)
-            if "Qwen2_5_VLProcessor" in error_str or "cannot import name" in error_str:
+            if "Qwen2_5_VLProcessor" in error_str:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0 for Qwen2_5_VLProcessor. Current transformers version may be too old. Please upgrade: pip install transformers>=4.47.0. Error: {error_str}"
+            elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                # This error was already handled above, but if it reaches here, provide helpful message
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed due to flash attention compatibility issue. This may require a newer transformers version or disabling flash attention. Error: {error_str}"
             else:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {error_str}"
