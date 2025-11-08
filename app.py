@@ -860,6 +860,33 @@ def _init_dotsocr_model():
             model_path = "rednote-hilab/dots.ocr"
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             
+            # Check transformers version
+            try:
+                import transformers
+                transformers_version = transformers.__version__
+                # dots.ocr may require transformers >= 4.47.0 for Qwen2_5_VLProcessor
+                try:
+                    from packaging import version
+                    if version.parse(transformers_version) < version.parse("4.47.0"):
+                        DOTSOCR_AVAILABLE = False
+                        DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0, but you have {transformers_version}. Please upgrade: pip install transformers>=4.47.0"
+                        raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                except ImportError:
+                    # packaging not available, try to check version manually
+                    version_parts = transformers_version.split('.')
+                    if len(version_parts) >= 2:
+                        major, minor = int(version_parts[0]), int(version_parts[1])
+                        if major < 4 or (major == 4 and minor < 47):
+                            DOTSOCR_AVAILABLE = False
+                            DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0, but you have {transformers_version}. Please upgrade: pip install transformers>=4.47.0"
+                            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+            except RuntimeError:
+                # Re-raise version check errors
+                raise
+            except Exception:
+                # If version check fails, continue anyway
+                pass
+            
             # Check for flash attention
             flash_attn_available = False
             try:
@@ -880,9 +907,26 @@ def _init_dotsocr_model():
                 dotsocr_model.to(device)
             
             dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        except RuntimeError:
+            # Re-raise RuntimeError as-is (from version check)
+            raise
+        except ImportError as e:
+            error_str = str(e)
+            if "Qwen2_5_VLProcessor" in error_str or "cannot import name" in error_str:
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0 for Qwen2_5_VLProcessor. Current transformers version may be too old. Please upgrade: pip install transformers>=4.47.0. Error: {error_str}"
+            else:
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {error_str}"
+            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
         except Exception as e:
-            DOTSOCR_AVAILABLE = False
-            DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {str(e)}"
+            error_str = str(e)
+            if "Qwen2_5_VLProcessor" in error_str or "cannot import name" in error_str:
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0 for Qwen2_5_VLProcessor. Current transformers version may be too old. Please upgrade: pip install transformers>=4.47.0. Error: {error_str}"
+            else:
+                DOTSOCR_AVAILABLE = False
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {error_str}"
             raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
 
 def process_image_olmocr(image, prompt=None):
@@ -1860,6 +1904,7 @@ def build_blocks(theme):
             - Achieves state-of-the-art results for text, tables, and reading order
             - Supports both images and PDFs
             - Model: rednote-hilab/dots.ocr
+            - **Requires transformers >= 4.47.0** - Please upgrade transformers if you see import errors
 
             ### Gemini Flash 2.5
             - Google Gemini model for fast, high-quality Markdown conversion
