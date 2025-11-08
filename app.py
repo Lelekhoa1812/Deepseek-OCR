@@ -999,9 +999,42 @@ def _init_dotsocr_model():
             
             try:
                 dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
-            except (ImportError, AttributeError) as e:
+            except (ImportError, AttributeError, TypeError) as e:
                 error_str = str(e)
-                if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                # Handle video_processor error - try to patch it
+                if "video_processor" in error_str or "BaseVideoProcessor" in error_str:
+                    try:
+                        # Try using the fixed version of the model
+                        fixed_model_path = "strangervisionhf/dots.ocr-base-fix"
+                        dotsocr_processor = AutoProcessor.from_pretrained(fixed_model_path, trust_remote_code=True)
+                        # If fixed processor works, reload model from fixed path too
+                        dotsocr_model = AutoModelForCausalLM.from_pretrained(
+                            fixed_model_path,
+                            attn_implementation="flash_attention_2" if flash_attn_available else None,
+                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                            device_map="auto" if torch.cuda.is_available() else None,
+                            trust_remote_code=True
+                        ).eval()
+                        if not torch.cuda.is_available():
+                            dotsocr_model.to(device)
+                    except Exception as fix_error:
+                        # If fixed version doesn't work, try manual patch
+                        try:
+                            from transformers import Qwen2_5_VLProcessor
+                            from transformers import AutoImageProcessor, AutoTokenizer
+                            image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
+                            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                            # Create processor manually with video_processor=None
+                            dotsocr_processor = Qwen2_5_VLProcessor(
+                                image_processor=image_processor,
+                                tokenizer=tokenizer,
+                                video_processor=None
+                            )
+                        except Exception as patch_error:
+                            DOTSOCR_AVAILABLE = False
+                            DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Tried fixed version and manual patch, both failed. Original error: {error_str}, Fix error: {str(fix_error)}, Patch error: {str(patch_error)}"
+                            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
                     # If processor loading fails due to flash attention, it's likely a transformers version issue
                     DOTSOCR_AVAILABLE = False
                     DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed. This may require a newer transformers version. Error: {error_str}"
@@ -1026,17 +1059,45 @@ def _init_dotsocr_model():
             raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
         except Exception as e:
             error_str = str(e)
-            if "Qwen2_5_VLProcessor" in error_str:
+            if "video_processor" in error_str or "BaseVideoProcessor" in error_str:
+                # Try using the fixed version of the model
+                try:
+                    # Check for flash attention again in case it wasn't set
+                    flash_attn_available_local = False
+                    try:
+                        importlib.import_module('flash_attn')
+                        flash_attn_available_local = True
+                    except:
+                        pass
+                    
+                    fixed_model_path = "strangervisionhf/dots.ocr-base-fix"
+                    dotsocr_model = AutoModelForCausalLM.from_pretrained(
+                        fixed_model_path,
+                        attn_implementation="flash_attention_2" if flash_attn_available_local else None,
+                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                        device_map="auto" if torch.cuda.is_available() else None,
+                        trust_remote_code=True
+                    ).eval()
+                    if not torch.cuda.is_available():
+                        dotsocr_model.to(device)
+                    dotsocr_processor = AutoProcessor.from_pretrained(fixed_model_path, trust_remote_code=True)
+                except Exception as fix_error:
+                    DOTSOCR_AVAILABLE = False
+                    DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed with video_processor error. Tried fixed version but it also failed. Original error: {error_str}, Fix error: {str(fix_error)}"
+                    raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+            elif "Qwen2_5_VLProcessor" in error_str:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr requires transformers >= 4.47.0 for Qwen2_5_VLProcessor. Current transformers version may be too old. Please upgrade: pip install transformers>=4.47.0. Error: {error_str}"
+                raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
             elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
                 # This error was already handled above, but if it reaches here, provide helpful message
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed due to flash attention compatibility issue. This may require a newer transformers version or disabling flash attention. Error: {error_str}"
+                raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
             else:
                 DOTSOCR_AVAILABLE = False
                 DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {error_str}"
-            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
 
 def process_image_olmocr(image, prompt=None):
     """Process image using olmOCR and return results in Markdown format.
