@@ -35,13 +35,70 @@ warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
-# PaddleOCR-VL imports
+# PaddleOCR-VL imports - try multiple import strategies
+PADDLEOCRVL_AVAILABLE = False
+PaddleOCRVL = None
+PaddleOCR = None
+PADDLEOCRVL_ERROR_MESSAGE = None
+
 try:
-    from paddleocr import PaddleOCRVL
-    PADDLEOCRVL_AVAILABLE = True
-except ImportError:
+    # First, try to import regular PaddleOCR to check if package is installed
+    import paddleocr
+    PaddleOCR = paddleocr.PaddleOCR
+    
+    # Try direct import of PaddleOCRVL
+    try:
+        from paddleocr import PaddleOCRVL
+        PADDLEOCRVL_AVAILABLE = True
+    except ImportError:
+        try:
+            # Try alternative import path
+            from paddleocr.paddleocr_vl import PaddleOCRVL
+            PADDLEOCRVL_AVAILABLE = True
+        except ImportError:
+            try:
+                # Check if it's available as an attribute
+                if hasattr(paddleocr, 'PaddleOCRVL'):
+                    PaddleOCRVL = paddleocr.PaddleOCRVL
+                    PADDLEOCRVL_AVAILABLE = True
+                # Check if doc-parser provides document parsing through regular PaddleOCR
+                # In some versions, doc-parser might be accessed via PaddleOCR with special params
+                elif hasattr(paddleocr, 'paddleocr_vl'):
+                    try:
+                        from paddleocr.paddleocr_vl import PaddleOCRVL
+                        PADDLEOCRVL_AVAILABLE = True
+                    except:
+                        pass
+            except Exception as e:
+                PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
+                
+    # If PaddleOCRVL not found, check if we can use regular PaddleOCR with doc-parser features
+    if not PADDLEOCRVL_AVAILABLE:
+        # Some versions might have doc-parser as a feature flag
+        try:
+            # Try to see if doc-parser is available as a parameter or method
+            test_ocr = PaddleOCR(use_angle_cls=True, lang='en')
+            # If we get here, PaddleOCR works but PaddleOCRVL might not exist
+            # We'll use regular PaddleOCR as fallback
+            PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
+        except Exception as e:
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(e)}"
+            
+except ImportError as e:
     PADDLEOCRVL_AVAILABLE = False
-    warnings.warn("PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'")
+    PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR package not found. Install with: pip install 'paddleocr[doc-parser]'. Error: {str(e)}"
+except Exception as e:
+    PADDLEOCRVL_AVAILABLE = False
+    PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL setup failed: {str(e)}"
+
+if not PADDLEOCRVL_AVAILABLE:
+    # Provide diagnostic information
+    try:
+        import paddleocr
+        available_attrs = [attr for attr in dir(paddleocr) if not attr.startswith('_')]
+        warnings.warn(f"{PADDLEOCRVL_ERROR_MESSAGE or 'PaddleOCR-VL not available'}. Available PaddleOCR attributes: {', '.join(available_attrs[:10])}")
+    except:
+        warnings.warn(PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'")
 
 # Gemini imports (optional)
 try:
@@ -52,6 +109,26 @@ except Exception:
     GEMINI_AVAILABLE = False
     types = None
     warnings.warn("Gemini SDK not available. Install with: pip install google-generativeai")
+
+# olmOCR imports (optional)
+OLMOCR_AVAILABLE = False
+OLMOCR_MODEL = None
+OLMOCR_PROCESSOR = None
+OLMOCR_ERROR_MESSAGE = None
+
+try:
+    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+    from olmocr.data.renderpdf import render_pdf_to_base64png
+    from olmocr.prompts import build_no_anchoring_v4_yaml_prompt
+    OLMOCR_AVAILABLE = True
+except ImportError as e:
+    OLMOCR_AVAILABLE = False
+    OLMOCR_ERROR_MESSAGE = f"olmOCR not available. Install with: pip install olmocr>=0.4.0. Error: {str(e)}"
+    warnings.warn(OLMOCR_ERROR_MESSAGE)
+except Exception as e:
+    OLMOCR_AVAILABLE = False
+    OLMOCR_ERROR_MESSAGE = f"olmOCR setup failed: {str(e)}"
+    warnings.warn(OLMOCR_ERROR_MESSAGE)
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -220,6 +297,10 @@ KEY_TO_MODE_LABEL = {v: k for k, v in MODE_LABEL_TO_KEY.items()}
 # Defer PaddleOCR-VL pipeline init until first use to avoid startup errors on some builds
 paddleocrvl_pipeline = None
 PADDLEOCRVL_ERROR_MESSAGE = None
+
+# Defer olmOCR model init until first use to avoid startup errors
+olmocr_model = None
+olmocr_processor = None
 
 TASK_PROMPTS = {
     "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
@@ -560,8 +641,8 @@ def process_image_paddleocrvl(image, prompt=None):
         return " Error Upload image", "", "", None, []
     
     # Lazy init to avoid import-time errors on some environments
-    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE
-    if not PADDLEOCRVL_AVAILABLE:
+    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE, PaddleOCRVL
+    if not PADDLEOCRVL_AVAILABLE or PaddleOCRVL is None:
         msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
         return f" {msg}", "", "", None, []
     if paddleocrvl_pipeline is None:
@@ -692,6 +773,146 @@ def process_image_paddleocrvl(image, prompt=None):
     
     except Exception as e:
         os.unlink(tmp.name)
+        import traceback
+        error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+        warnings.warn(error_msg)
+        return f"Error: {str(e)}", "", "", None, []
+
+def _init_olmocr_model():
+    """Lazy initialization of olmOCR model."""
+    global olmocr_model, olmocr_processor, OLMOCR_AVAILABLE, OLMOCR_ERROR_MESSAGE
+    
+    if not OLMOCR_AVAILABLE:
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install olmocr>=0.4.0"
+        raise RuntimeError(msg)
+    
+    if olmocr_model is None or olmocr_processor is None:
+        try:
+            model_name = "allenai/olmOCR-2-7B-1025-FP8"
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            olmocr_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                trust_remote_code=True
+            ).eval()
+            olmocr_model.to(device)
+            
+            olmocr_processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
+        except Exception as e:
+            OLMOCR_AVAILABLE = False
+            OLMOCR_ERROR_MESSAGE = f"olmOCR model initialization failed: {str(e)}"
+            raise RuntimeError(OLMOCR_ERROR_MESSAGE)
+
+def _resize_image_for_olmocr(image: Image.Image, target_longest_dim: int = 1288) -> Image.Image:
+    """Resize image so longest dimension is target_longest_dim pixels."""
+    width, height = image.size
+    longest_dim = max(width, height)
+    
+    if longest_dim == target_longest_dim:
+        return image
+    
+    scale = target_longest_dim / longest_dim
+    new_width = int(width * scale)
+    new_height = int(height * scale)
+    
+    return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+def process_image_olmocr(image, prompt=None):
+    """Process image using olmOCR and return results in Markdown format.
+    
+    Args:
+        image: PIL Image to process
+        prompt: Optional custom prompt. If None, uses default document parsing prompt.
+    """
+    if image is None:
+        return " Error Upload image", "", "", None, []
+    
+    # Lazy init to avoid import-time errors
+    global olmocr_model, olmocr_processor, OLMOCR_AVAILABLE, OLMOCR_ERROR_MESSAGE
+    if not OLMOCR_AVAILABLE:
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install olmocr>=0.4.0"
+        return f" {msg}", "", "", None, []
+    
+    try:
+        _init_olmocr_model()
+    except RuntimeError as e:
+        return f" {str(e)}", "", "", None, []
+    
+    if image.mode in ('RGBA', 'LA', 'P'):
+        image = image.convert('RGB')
+    image = ImageOps.exif_transpose(image)
+    
+    # Resize image so longest dimension is 1288 pixels
+    image_resized = _resize_image_for_olmocr(image, target_longest_dim=1288)
+    
+    # Build the prompt
+    if prompt:
+        text_prompt = prompt
+    else:
+        text_prompt = build_no_anchoring_v4_yaml_prompt()
+    
+    # Convert image to base64
+    buf = BytesIO()
+    image_resized.save(buf, format='PNG')
+    image_base64 = base64.b64encode(buf.getvalue()).decode()
+    
+    # Build messages
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text_prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
+            ],
+        }
+    ]
+    
+    try:
+        # Apply chat template and processor
+        text = olmocr_processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        main_image = Image.open(BytesIO(base64.b64decode(image_base64)))
+        
+        inputs = olmocr_processor(
+            text=[text],
+            images=[main_image],
+            padding=True,
+            return_tensors="pt",
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        inputs = {key: value.to(device) for (key, value) in inputs.items()}
+        
+        # Generate output
+        with torch.no_grad():
+            output = olmocr_model.generate(
+                **inputs,
+                temperature=0.1,
+                max_new_tokens=2048,
+                num_return_sequences=1,
+                do_sample=True,
+            )
+        
+        # Decode output
+        prompt_length = inputs["input_ids"].shape[1]
+        new_tokens = output[:, prompt_length:]
+        text_output = olmocr_processor.tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+        
+        result = text_output[0] if text_output else ""
+        
+        if not result or not result.strip():
+            return "No text detected", "", "", None, []
+        
+        # Extract markdown from YAML frontmatter if present
+        # olmOCR output format: ---\n...\n---\n<content>
+        if result.startswith("---"):
+            parts = result.split("---", 2)
+            if len(parts) >= 3:
+                result = parts[2].strip()
+        
+        # Return same content for text, markdown, and raw
+        return result, result, result, None, []
+    
+    except Exception as e:
         import traceback
         error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
         warnings.warn(error_msg)
@@ -1015,6 +1236,128 @@ def process_pdf_all_paddleocrvl(path, dpi=300, page_range_text="", insert_separa
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
+def process_pdf_olmocr(path, dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
+    """Process PDF using olmOCR."""
+    # Early exit if engine is unavailable
+    if not OLMOCR_AVAILABLE:
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install olmocr>=0.4.0"
+        return msg, f"<!-- {msg} -->", msg, None, []
+    
+    try:
+        _init_olmocr_model()
+    except RuntimeError as e:
+        return str(e), f"<!-- {str(e)} -->", str(e), None, []
+    
+    doc = fitz.open(path)
+    texts, markdowns, raws, all_crops = [], [], [], []
+    if page_indices is None:
+        page_indices = list(range(len(doc)))
+    
+    for i in page_indices:
+        cache_key = ("olmOCR", path, int(dpi), int(i))
+        cached = _page_cache_get(cache_key)
+        if cached:
+            text, md, raw, crops = cached
+            if text and text.strip() and text != "No text detected":
+                texts.append(f"### Page {i + 1}\n\n{text}")
+                markdowns.append(f"### Page {i + 1}\n\n{md}")
+                raws.append(f"=== Page {i + 1} ===\n{raw}")
+                all_crops.extend(crops or [])
+            continue
+        
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
+        img = Image.open(BytesIO(pix.tobytes("png")))
+        
+        attempt = 0
+        while True:
+            try:
+                text, md, raw, _, crops = process_image_olmocr(img)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        
+        if text and text != "No text detected":
+            texts.append(f"### Page {i + 1}\n\n{text}")
+            markdowns.append(f"### Page {i + 1}\n\n{md}")
+            raws.append(f"=== Page {i + 1} ===\n{raw}")
+            all_crops.extend(crops)
+            _page_cache_set(cache_key, (text, md, raw, crops))
+    
+    doc.close()
+    
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts) if texts else "",
+            sep.join(markdowns) if markdowns else "",
+            "\n\n".join(raws), None, all_crops)
+
+def process_pdf_all_olmocr(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
+    """Process all pages of PDF using olmOCR."""
+    # Early exit if engine is unavailable
+    if not OLMOCR_AVAILABLE:
+        msg = OLMOCR_ERROR_MESSAGE or "olmOCR not available. Install with: pip install olmocr>=0.4.0"
+        return msg, f"<!-- {msg} -->", msg, None, []
+    
+    doc = fitz.open(path)
+    total_pages = len(doc)
+    doc.close()
+    
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+    
+    target_pages = parse_ranges(page_range_text, total_pages)
+    
+    texts_all, mds_all, raws_all, crops_all = [], [], [], []
+    for start in range(0, len(target_pages), batch_size):
+        batch = target_pages[start:start+batch_size]
+        attempt = 0
+        while True:
+            try:
+                tx, mdx, rawx, _, cropsx = process_pdf_olmocr(path, dpi=dpi, page_indices=batch, insert_separators=insert_separators)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        if tx:
+            texts_all.append(tx)
+        if mdx:
+            mds_all.append(mdx)
+        if rawx:
+            raws_all.append(rawx)
+        crops_all.extend(cropsx)
+    
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
+            "\n\n".join(raws_all), None, crops_all)
+
 def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, ocr_engine="DeepSeekOCR"):
     if not path:
         return "Error Upload file", "", "", None, []
@@ -1024,6 +1367,11 @@ def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_rang
             return process_pdf_all_paddleocrvl(path, dpi=dpi, page_range_text=page_range_text, insert_separators=insert_separators)
         else:
             return process_image_paddleocrvl(Image.open(path))
+    elif ocr_engine == "olmOCR":
+        if path.lower().endswith('.pdf'):
+            return process_pdf_all_olmocr(path, dpi=dpi, page_range_text=page_range_text, insert_separators=insert_separators)
+        else:
+            return process_image_olmocr(Image.open(path))
     else:
         if path.lower().endswith('.pdf'):
             return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
@@ -1088,10 +1436,10 @@ def build_blocks(theme):
                 page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
                 # OCR Engine selector
                 ocr_engine = gr.Radio(
-                    choices=[c for c in ["DeepSeekOCR", "PaddleOCR-VL", "Gemini Flash 2.5"] if (c != "PaddleOCR-VL" or PADDLEOCRVL_AVAILABLE) and (c != "Gemini Flash 2.5" or GEMINI_AVAILABLE)],
+                    choices=[c for c in ["DeepSeekOCR", "PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR"] if (c != "PaddleOCR-VL" or PADDLEOCRVL_AVAILABLE) and (c != "Gemini Flash 2.5" or GEMINI_AVAILABLE) and (c != "olmOCR" or OLMOCR_AVAILABLE)],
                     value="DeepSeekOCR",
                     label="OCR Engine",
-                    info="Choose between DeepSeekOCR, PaddleOCR-VL, or Gemini Flash 2.5"
+                    info="Choose between DeepSeekOCR, PaddleOCR-VL, Gemini Flash 2.5, or olmOCR"
                 )
                 # Processing options container (for DeepSeekOCR)
                 mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode (DeepSeekOCR)")
@@ -1129,6 +1477,7 @@ def build_blocks(theme):
             - **DeepSeekOCR**: AI-powered OCR with advanced document understanding and markdown conversion
             - **PaddleOCR-VL**: Document parsing model that converts documents to markdown format (install with: `pip install 'paddleocr[doc-parser]'`)
             - **Gemini Flash 2.5**: Google Gemini model for fast, high-quality Markdown conversion (set GEMINI_API_1..5 in .env)
+            - **olmOCR**: FP8 quantized vision-language model for document OCR (install with: `pip install olmocr>=0.4.0`)
             
             ### DeepSeekOCR Modes
             - Gundam: 1024 base + 640 tiles with cropping - Best balance
@@ -1150,6 +1499,12 @@ def build_blocks(theme):
 
             ### Gemini Flash 2.5
             - Google Gemini model for fast, high-quality Markdown conversion
+            
+            ### olmOCR
+            - FP8 quantized vision-language model based on Qwen2.5-VL-7B-Instruct
+            - Automatically converts documents to markdown format
+            - Supports both images and PDFs
+            - Model: allenai/olmOCR-2-7B-1025-FP8
             """)
         
         # Enhanced preview logic for PDFs: show the selected page and slider
@@ -1188,7 +1543,7 @@ def build_blocks(theme):
         
         def toggle_ocr_engine(engine):
             """Show/hide controls based on selected OCR engine."""
-            if engine in ["PaddleOCR-VL", "Gemini Flash 2.5"]:
+            if engine in ["PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR"]:
                 return (
                     gr.update(visible=False),  # mode
                     gr.update(visible=False),  # task
