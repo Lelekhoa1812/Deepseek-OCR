@@ -1,6 +1,6 @@
 torch==2.6.0
 transformers>=4.47.0
-tokenizers==0.20.3
+tokenizers>=0.21
 accelerate
 einops
 addict 
