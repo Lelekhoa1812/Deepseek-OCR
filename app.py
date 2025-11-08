@@ -227,6 +227,39 @@ class GeminiClient:
 
 MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 
+# Monkey-patch LlamaFlashAttention2 if it doesn't exist (for compatibility with transformers >= 4.47.0)
+# The model's custom code tries to import LlamaFlashAttention2 which was removed in transformers 4.47.0+
+try:
+    from transformers.models.llama.modeling_llama import LlamaFlashAttention2
+except ImportError:
+    # LlamaFlashAttention2 doesn't exist, create a compatibility alias
+    try:
+        import transformers.models.llama.modeling_llama as llama_module
+        # Try to use LlamaSdpaAttention or LlamaAttention as fallback
+        if hasattr(llama_module, 'LlamaSdpaAttention'):
+            # Use LlamaSdpaAttention as a compatibility alias
+            llama_module.LlamaFlashAttention2 = llama_module.LlamaSdpaAttention
+        elif hasattr(llama_module, 'LlamaAttention'):
+            # Use LlamaAttention as a compatibility alias
+            llama_module.LlamaFlashAttention2 = llama_module.LlamaAttention
+        else:
+            # Create a minimal compatibility class that inherits from LlamaAttention if available
+            try:
+                from transformers.models.llama.modeling_llama import LlamaAttention
+                class LlamaFlashAttention2(LlamaAttention):
+                    """Compatibility alias for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
+                    pass
+                llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
+            except:
+                # Last resort: create a minimal dummy class
+                class LlamaFlashAttention2:
+                    """Compatibility alias for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
+                    def __init__(self, *args, **kwargs):
+                        pass
+                llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
+    except Exception as e:
+        warnings.warn(f"Could not create LlamaFlashAttention2 compatibility layer: {e}. Model loading may fail.")
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 # Set padding side early
 tokenizer.padding_side = 'right'
