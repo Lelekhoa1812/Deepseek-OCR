@@ -24,6 +24,7 @@ from threading import Event, Thread
 from threading import Lock
 from itertools import cycle
 import logging
+import json
 
 # Suppress transformers warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
@@ -129,6 +130,25 @@ except Exception as e:
     OLMOCR_AVAILABLE = False
     OLMOCR_ERROR_MESSAGE = f"olmOCR setup failed: {str(e)}"
     warnings.warn(OLMOCR_ERROR_MESSAGE)
+
+# dots.ocr imports (optional)
+DOTSOCR_AVAILABLE = False
+DOTSOCR_MODEL = None
+DOTSOCR_PROCESSOR = None
+DOTSOCR_ERROR_MESSAGE = None
+
+try:
+    from transformers import AutoModelForCausalLM, AutoProcessor
+    from qwen_vl_utils import process_vision_info
+    DOTSOCR_AVAILABLE = True
+except ImportError as e:
+    DOTSOCR_AVAILABLE = False
+    DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {str(e)}"
+    warnings.warn(DOTSOCR_ERROR_MESSAGE)
+except Exception as e:
+    DOTSOCR_AVAILABLE = False
+    DOTSOCR_ERROR_MESSAGE = f"dots.ocr setup failed: {str(e)}"
+    warnings.warn(DOTSOCR_ERROR_MESSAGE)
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -301,6 +321,10 @@ PADDLEOCRVL_ERROR_MESSAGE = None
 # Defer olmOCR model init until first use to avoid startup errors
 olmocr_model = None
 olmocr_processor = None
+
+# Defer dots.ocr model init until first use to avoid startup errors
+dotsocr_model = None
+dotsocr_processor = None
 
 TASK_PROMPTS = {
     "Markdown": {"prompt": "<image>\n<|grounding|>Convert the document to GitHub-flavored Markdown. Preserve headings, lists, links, code blocks, and tables.", "has_grounding": True},
@@ -818,6 +842,44 @@ def _resize_image_for_olmocr(image: Image.Image, target_longest_dim: int = 1288)
     
     return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
+def _init_dotsocr_model():
+    """Lazy initialization of dots.ocr model."""
+    global dotsocr_model, dotsocr_processor, DOTSOCR_AVAILABLE, DOTSOCR_ERROR_MESSAGE
+    
+    if not DOTSOCR_AVAILABLE:
+        msg = DOTSOCR_ERROR_MESSAGE or "dots.ocr not available. Install with: pip install qwen-vl-utils"
+        raise RuntimeError(msg)
+    
+    if dotsocr_model is None or dotsocr_processor is None:
+        try:
+            model_path = "rednote-hilab/dots.ocr"
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            # Check for flash attention
+            flash_attn_available = False
+            try:
+                importlib.import_module('flash_attn')
+                flash_attn_available = True
+            except:
+                pass
+            
+            dotsocr_model = AutoModelForCausalLM.from_pretrained(
+                model_path,
+                attn_implementation="flash_attention_2" if flash_attn_available else None,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
+                trust_remote_code=True
+            ).eval()
+            
+            if not torch.cuda.is_available():
+                dotsocr_model.to(device)
+            
+            dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+        except Exception as e:
+            DOTSOCR_AVAILABLE = False
+            DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed: {str(e)}"
+            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+
 def process_image_olmocr(image, prompt=None):
     """Process image using olmOCR and return results in Markdown format.
     
@@ -913,6 +975,162 @@ def process_image_olmocr(image, prompt=None):
         return result, result, result, None, []
     
     except Exception as e:
+        import traceback
+        error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
+        warnings.warn(error_msg)
+        return f"Error: {str(e)}", "", "", None, []
+
+def process_image_dotsocr(image, prompt=None):
+    """Process image using dots.ocr and return results in Markdown format.
+    
+    Args:
+        image: PIL Image to process
+        prompt: Optional custom prompt. If None, uses default document parsing prompt.
+    """
+    if image is None:
+        return " Error Upload image", "", "", None, []
+    
+    # Lazy init to avoid import-time errors
+    global dotsocr_model, dotsocr_processor, DOTSOCR_AVAILABLE, DOTSOCR_ERROR_MESSAGE
+    if not DOTSOCR_AVAILABLE:
+        msg = DOTSOCR_ERROR_MESSAGE or "dots.ocr not available. Install with: pip install qwen-vl-utils"
+        return f" {msg}", "", "", None, []
+    
+    try:
+        _init_dotsocr_model()
+    except RuntimeError as e:
+        return f" {str(e)}", "", "", None, []
+    
+    if image.mode in ('RGBA', 'LA', 'P'):
+        image = image.convert('RGB')
+    image = ImageOps.exif_transpose(image)
+    
+    # Save image to temporary file
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
+    image.save(tmp.name, 'JPEG', quality=95)
+    tmp.close()
+    
+    # Build the prompt
+    if prompt:
+        text_prompt = prompt
+    else:
+        # Default prompt for dots.ocr document parsing
+        text_prompt = """Please output the layout information from the PDF image, including each layout element's bbox, its category, and the corresponding text content within the bbox.
+
+1. Bbox format: [x1, y1, x2, y2]
+
+2. Layout Categories: The possible categories are ['Caption', 'Footnote', 'Formula', 'List-item', 'Page-footer', 'Page-header', 'Picture', 'Section-header', 'Table', 'Text', 'Title'].
+
+3. Text Extraction & Formatting Rules:
+    - Picture: For the 'Picture' category, the text field should be omitted.
+    - Formula: Format its text as LaTeX.
+    - Table: Format its text as HTML.
+    - All Others (Text, Title, etc.): Format their text as Markdown.
+
+4. Constraints:
+    - The output text must be the original text from the image, with no translation.
+    - All layout elements must be sorted according to human reading order.
+
+5. Final Output: The entire output must be a single JSON object."""
+    
+    # Build messages
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": tmp.name
+                },
+                {"type": "text", "text": text_prompt}
+            ]
+        }
+    ]
+    
+    try:
+        # Preparation for inference
+        text = dotsocr_processor.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = dotsocr_processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        inputs = {key: value.to(device) for (key, value) in inputs.items()}
+        
+        # Generate output
+        with torch.no_grad():
+            generated_ids = dotsocr_model.generate(**inputs, max_new_tokens=24000)
+        
+        # Decode output
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
+        ]
+        output_text = dotsocr_processor.batch_decode(
+            generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        
+        result = output_text[0] if output_text else ""
+        
+        # Clean up temp file
+        os.unlink(tmp.name)
+        
+        if not result or not result.strip():
+            return "No text detected", "", "", None, []
+        
+        # Try to parse JSON and convert to markdown
+        try:
+            layout_data = json.loads(result)
+            
+            # Convert layout data to markdown
+            markdown_parts = []
+            if isinstance(layout_data, dict) and "layout" in layout_data:
+                layout_items = layout_data["layout"]
+            elif isinstance(layout_data, list):
+                layout_items = layout_data
+            else:
+                layout_items = [layout_data]
+            
+            for item in layout_items:
+                if isinstance(item, dict):
+                    category = item.get("category", "")
+                    text_content = item.get("text", "")
+                    bbox = item.get("bbox", [])
+                    
+                    if category == "Title":
+                        markdown_parts.append(f"# {text_content}")
+                    elif category == "Section-header":
+                        markdown_parts.append(f"## {text_content}")
+                    elif category == "Table":
+                        markdown_parts.append(text_content)  # Already HTML formatted
+                    elif category == "Formula":
+                        markdown_parts.append(f"$${text_content}$$")  # LaTeX formula
+                    elif category == "Picture":
+                        markdown_parts.append(f"![Image](bbox: {bbox})")
+                    else:
+                        markdown_parts.append(text_content)
+            
+            markdown_result = "\n\n".join(markdown_parts)
+            return markdown_result, markdown_result, result, None, []
+        except json.JSONDecodeError:
+            # If not JSON, return as-is
+            return result, result, result, None, []
+    
+    except Exception as e:
+        # Clean up temp file
+        try:
+            os.unlink(tmp.name)
+        except:
+            pass
+        
         import traceback
         error_msg = f"Error: {str(e)}\n{traceback.format_exc()}"
         warnings.warn(error_msg)
@@ -1358,6 +1576,128 @@ def process_pdf_all_olmocr(path, dpi=300, page_range_text="", insert_separators=
             sep.join(mds_all) if mds_all else "No text in PDF",
             "\n\n".join(raws_all), None, crops_all)
 
+def process_pdf_dotsocr(path, dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
+    """Process PDF using dots.ocr."""
+    # Early exit if engine is unavailable
+    if not DOTSOCR_AVAILABLE:
+        msg = DOTSOCR_ERROR_MESSAGE or "dots.ocr not available. Install with: pip install qwen-vl-utils"
+        return msg, f"<!-- {msg} -->", msg, None, []
+    
+    try:
+        _init_dotsocr_model()
+    except RuntimeError as e:
+        return str(e), f"<!-- {str(e)} -->", str(e), None, []
+    
+    doc = fitz.open(path)
+    texts, markdowns, raws, all_crops = [], [], [], []
+    if page_indices is None:
+        page_indices = list(range(len(doc)))
+    
+    for i in page_indices:
+        cache_key = ("dots.ocr", path, int(dpi), int(i))
+        cached = _page_cache_get(cache_key)
+        if cached:
+            text, md, raw, crops = cached
+            if text and text.strip() and text != "No text detected":
+                texts.append(f"### Page {i + 1}\n\n{text}")
+                markdowns.append(f"### Page {i + 1}\n\n{md}")
+                raws.append(f"=== Page {i + 1} ===\n{raw}")
+                all_crops.extend(crops or [])
+            continue
+        
+        page = doc.load_page(i)
+        pix = page.get_pixmap(matrix=fitz.Matrix(dpi/72, dpi/72), alpha=False)
+        img = Image.open(BytesIO(pix.tobytes("png")))
+        
+        attempt = 0
+        while True:
+            try:
+                text, md, raw, _, crops = process_image_dotsocr(img)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    text, md, raw, crops = "", f"<!-- Failed to process page {i+1} after retries -->", "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        
+        if text and text != "No text detected":
+            texts.append(f"### Page {i + 1}\n\n{text}")
+            markdowns.append(f"### Page {i + 1}\n\n{md}")
+            raws.append(f"=== Page {i + 1} ===\n{raw}")
+            all_crops.extend(crops)
+            _page_cache_set(cache_key, (text, md, raw, crops))
+    
+    doc.close()
+    
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts) if texts else "",
+            sep.join(markdowns) if markdowns else "",
+            "\n\n".join(raws), None, all_crops)
+
+def process_pdf_all_dotsocr(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
+    """Process all pages of PDF using dots.ocr."""
+    # Early exit if engine is unavailable
+    if not DOTSOCR_AVAILABLE:
+        msg = DOTSOCR_ERROR_MESSAGE or "dots.ocr not available. Install with: pip install qwen-vl-utils"
+        return msg, f"<!-- {msg} -->", msg, None, []
+    
+    doc = fitz.open(path)
+    total_pages = len(doc)
+    doc.close()
+    
+    def parse_ranges(s, total):
+        if not s.strip():
+            return list(range(total))
+        pages = set()
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        for part in parts:
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    a, b = int(a) - 1, int(b) - 1
+                except:
+                    continue
+                for x in range(max(0, a), min(total - 1, b) + 1):
+                    pages.add(x)
+            else:
+                try:
+                    idx = int(part) - 1
+                    if 0 <= idx < total:
+                        pages.add(idx)
+                except:
+                    continue
+        return sorted(pages)
+    
+    target_pages = parse_ranges(page_range_text, total_pages)
+    
+    texts_all, mds_all, raws_all, crops_all = [], [], [], []
+    for start in range(0, len(target_pages), batch_size):
+        batch = target_pages[start:start+batch_size]
+        attempt = 0
+        while True:
+            try:
+                tx, mdx, rawx, _, cropsx = process_pdf_dotsocr(path, dpi=dpi, page_indices=batch, insert_separators=insert_separators)
+                break
+            except Exception:
+                attempt += 1
+                if attempt >= max_retries:
+                    tx, mdx, rawx, cropsx = "", "\n\n".join([f"<!-- Failed batch {start//batch_size+1} -->"]), "", []
+                    break
+                time.sleep(retry_backoff_seconds * attempt)
+        if tx:
+            texts_all.append(tx)
+        if mdx:
+            mds_all.append(mdx)
+        if rawx:
+            raws_all.append(rawx)
+        crops_all.extend(cropsx)
+    
+    sep = "\n\n---\n\n" if insert_separators else "\n\n"
+    return (sep.join(texts_all) if texts_all else "No text in PDF",
+            sep.join(mds_all) if mds_all else "No text in PDF",
+            "\n\n".join(raws_all), None, crops_all)
+
 def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_range_text="", embed_figures=False, high_accuracy=False, insert_separators=True, ocr_engine="DeepSeekOCR"):
     if not path:
         return "Error Upload file", "", "", None, []
@@ -1372,6 +1712,11 @@ def process_file(path, mode_label, task_label, custom_prompt, dpi=300, page_rang
             return process_pdf_all_olmocr(path, dpi=dpi, page_range_text=page_range_text, insert_separators=insert_separators)
         else:
             return process_image_olmocr(Image.open(path))
+    elif ocr_engine == "dots.ocr":
+        if path.lower().endswith('.pdf'):
+            return process_pdf_all_dotsocr(path, dpi=dpi, page_range_text=page_range_text, insert_separators=insert_separators)
+        else:
+            return process_image_dotsocr(Image.open(path))
     else:
         if path.lower().endswith('.pdf'):
             return process_pdf_all(path, mode_label, task_label, custom_prompt, dpi=dpi, page_range_text=page_range_text, embed_figures=embed_figures, high_accuracy=high_accuracy, insert_separators=insert_separators)
@@ -1436,10 +1781,10 @@ def build_blocks(theme):
                 page_slider = gr.Slider(1, 1, value=1, step=1, label="Preview page", visible=False)
                 # OCR Engine selector
                 ocr_engine = gr.Radio(
-                    choices=[c for c in ["DeepSeekOCR", "PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR"] if (c != "PaddleOCR-VL" or PADDLEOCRVL_AVAILABLE) and (c != "Gemini Flash 2.5" or GEMINI_AVAILABLE) and (c != "olmOCR" or OLMOCR_AVAILABLE)],
+                    choices=[c for c in ["DeepSeekOCR", "PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR", "dots.ocr"] if (c != "PaddleOCR-VL" or PADDLEOCRVL_AVAILABLE) and (c != "Gemini Flash 2.5" or GEMINI_AVAILABLE) and (c != "olmOCR" or OLMOCR_AVAILABLE) and (c != "dots.ocr" or DOTSOCR_AVAILABLE)],
                     value="DeepSeekOCR",
                     label="OCR Engine",
-                    info="Choose between DeepSeekOCR, PaddleOCR-VL, Gemini Flash 2.5, or olmOCR"
+                    info="Choose between DeepSeekOCR, PaddleOCR-VL, Gemini Flash 2.5, olmOCR, or dots.ocr"
                 )
                 # Processing options container (for DeepSeekOCR)
                 mode = gr.Dropdown(list(MODE_LABEL_TO_KEY.keys()), value="Gundam", label="Mode (DeepSeekOCR)")
@@ -1478,6 +1823,7 @@ def build_blocks(theme):
             - **PaddleOCR-VL**: Document parsing model that converts documents to markdown format (install with: `pip install 'paddleocr[doc-parser]'`)
             - **Gemini Flash 2.5**: Google Gemini model for fast, high-quality Markdown conversion (set GEMINI_API_1..5 in .env)
             - **olmOCR**: FP8 quantized vision-language model for document OCR (install with: `pip install olmocr>=0.4.0`)
+            - **dots.ocr**: Multilingual document parser with SOTA performance on layout detection and content recognition (install with: `pip install qwen-vl-utils`)
             
             ### DeepSeekOCR Modes
             - Gundam: 1024 base + 640 tiles with cropping - Best balance
@@ -1505,6 +1851,12 @@ def build_blocks(theme):
             - Automatically converts documents to markdown format
             - Supports both images and PDFs
             - Model: allenai/olmOCR-2-7B-1025-FP8
+            
+            ### dots.ocr
+            - Multilingual document parser based on 1.7B LLM with SOTA performance
+            - Achieves state-of-the-art results for text, tables, and reading order
+            - Supports both images and PDFs
+            - Model: rednote-hilab/dots.ocr
             """)
         
         # Enhanced preview logic for PDFs: show the selected page and slider
@@ -1543,7 +1895,7 @@ def build_blocks(theme):
         
         def toggle_ocr_engine(engine):
             """Show/hide controls based on selected OCR engine."""
-            if engine in ["PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR"]:
+            if engine in ["PaddleOCR-VL", "Gemini Flash 2.5", "olmOCR", "dots.ocr"]:
                 return (
                     gr.update(visible=False),  # mode
                     gr.update(visible=False),  # task
@@ -1603,6 +1955,16 @@ def build_blocks(theme):
                     text, md, raw, img, crops = process_image_olmocr(image)
                 elif fp:
                     text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="olmOCR")
+                else:
+                    return "Error uploading file or image", "", "", None, [], None, None, None
+            elif ocr_engine_val == "dots.ocr":
+                # dots.ocr processing
+                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="dots.ocr")
+                elif image is not None:
+                    text, md, raw, img, crops = process_image_dotsocr(image)
+                elif fp:
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="dots.ocr")
                 else:
                     return "Error uploading file or image", "", "", None, [], None, None, None
             else:
