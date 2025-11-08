@@ -1595,6 +1595,16 @@ def build_blocks(theme):
                     text, md, raw, img, crops = process_pdf_all_gemini(fp, dpi=int(dpi_val), page_range_text=page_range_text, insert_separators=sep_pages)
                 else:
                     return "Error uploading file or image", "", "", None, [], None, None, None
+            elif ocr_engine_val == "olmOCR":
+                # olmOCR processing
+                if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="olmOCR")
+                elif image is not None:
+                    text, md, raw, img, crops = process_image_olmocr(image)
+                elif fp:
+                    text, md, raw, img, crops = process_file(fp, mode_label, task_label, custom_prompt, dpi=int(dpi_val), page_range_text=page_range_text, embed_figures=embed, high_accuracy=hiacc, insert_separators=sep_pages, ocr_engine="olmOCR")
+                else:
+                    return "Error uploading file or image", "", "", None, [], None, None, None
             else:
                 # DeepSeekOCR processing
                 if fp and isinstance(fp, str) and fp.lower().endswith('.pdf'):
