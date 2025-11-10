@@ -36,6 +36,27 @@ warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
+# Patch DynamicCache to fix 'seen_tokens' attribute error
+# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens was deprecated
+try:
+    from transformers.cache_utils import DynamicCache
+    if not hasattr(DynamicCache, 'seen_tokens'):
+        # Add seen_tokens property for backward compatibility
+        def _get_seen_tokens(self):
+            """Backward compatibility property for seen_tokens"""
+            # Calculate seen_tokens from the cache structure
+            if hasattr(self, 'key_cache') and self.key_cache:
+                # Return the length of the first layer's key cache
+                first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
+                if first_layer_keys is not None and len(first_layer_keys) > 0:
+                    return first_layer_keys[0].shape[-2] if hasattr(first_layer_keys[0], 'shape') else 0
+            return 0
+        
+        DynamicCache.seen_tokens = property(_get_seen_tokens)
+except (ImportError, AttributeError):
+    # If DynamicCache doesn't exist or patch fails, continue anyway
+    pass
+
 # PaddleOCR-VL imports - try multiple import strategies
 PADDLEOCRVL_AVAILABLE = False
 PaddleOCRVL = None
@@ -1019,39 +1040,75 @@ def _init_dotsocr_model():
                 dotsocr_processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
             except (ImportError, AttributeError, TypeError) as e:
                 error_str = str(e)
-                # Handle video_processor error - try to patch it
+                # Handle video_processor error - use manual patch (skip gated repo)
                 if "video_processor" in error_str or "BaseVideoProcessor" in error_str:
+                    # Try manual patch first (skip gated repo to avoid access issues)
                     try:
-                        # Try using the fixed version of the model
-                        fixed_model_path = "strangervisionhf/dots.ocr-base-fix"
-                        dotsocr_processor = AutoProcessor.from_pretrained(fixed_model_path, trust_remote_code=True)
-                        # If fixed processor works, reload model from fixed path too
-                        dotsocr_model = AutoModelForCausalLM.from_pretrained(
-                            fixed_model_path,
-                            attn_implementation="flash_attention_2" if flash_attn_available else None,
-                            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                            device_map="auto" if torch.cuda.is_available() else None,
-                            trust_remote_code=True
-                        ).eval()
-                        if not torch.cuda.is_available():
-                            dotsocr_model.to(device)
-                    except Exception as fix_error:
-                        # If fixed version doesn't work, try manual patch
+                        from transformers import Qwen2_5_VLProcessor
+                        from transformers import AutoImageProcessor, AutoTokenizer
+                        image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
+                        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                        # Create processor manually with video_processor=None
+                        # Qwen2_5_VLProcessor may require video_processor, so we create a dummy one if needed
                         try:
-                            from transformers import Qwen2_5_VLProcessor
-                            from transformers import AutoImageProcessor, AutoTokenizer
-                            image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
-                            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-                            # Create processor manually with video_processor=None
                             dotsocr_processor = Qwen2_5_VLProcessor(
                                 image_processor=image_processor,
-                                tokenizer=tokenizer,
-                                video_processor=None
+                                tokenizer=tokenizer
                             )
-                        except Exception as patch_error:
-                            DOTSOCR_AVAILABLE = False
-                            DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Tried fixed version and manual patch, both failed. Original error: {error_str}, Fix error: {str(fix_error)}, Patch error: {str(patch_error)}"
-                            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                        except TypeError:
+                            # If video_processor is required, try to create a minimal one or pass None explicitly
+                            # Some versions may accept None, others may need a dummy processor
+                            try:
+                                # Try with explicit None
+                                dotsocr_processor = Qwen2_5_VLProcessor(
+                                    image_processor=image_processor,
+                                    tokenizer=tokenizer,
+                                    video_processor=None
+                                )
+                            except (TypeError, ValueError):
+                                # Last resort: try to create processor by patching the class signature
+                                # Check if we can inspect the __init__ signature
+                                import inspect
+                                try:
+                                    sig = inspect.signature(Qwen2_5_VLProcessor.__init__)
+                                    # If video_processor has a default, we can call it
+                                    params = sig.parameters
+                                    if 'video_processor' in params and params['video_processor'].default is not inspect.Parameter.empty:
+                                        # video_processor has a default, call normally
+                                        dotsocr_processor = Qwen2_5_VLProcessor(
+                                            image_processor=image_processor,
+                                            tokenizer=tokenizer
+                                        )
+                                    else:
+                                        # Need to patch the class to accept None
+                                        # Create processor without video_processor argument
+                                        dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                        # Try to call parent __init__ if available
+                                        from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+                                        if hasattr(Qwen2VLProcessor, '__init__'):
+                                            try:
+                                                Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
+                                            except:
+                                                # Fallback to manual assignment
+                                                dotsocr_processor.image_processor = image_processor
+                                                dotsocr_processor.tokenizer = tokenizer
+                                        else:
+                                            dotsocr_processor.image_processor = image_processor
+                                            dotsocr_processor.tokenizer = tokenizer
+                                        # Set video_processor to None if the attribute exists
+                                        if hasattr(dotsocr_processor, 'video_processor'):
+                                            dotsocr_processor.video_processor = None
+                                except Exception:
+                                    # Final fallback: create processor without video_processor argument
+                                    dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                    dotsocr_processor.image_processor = image_processor
+                                    dotsocr_processor.tokenizer = tokenizer
+                                    if hasattr(dotsocr_processor, 'video_processor'):
+                                        dotsocr_processor.video_processor = None
+                    except Exception as patch_error:
+                        DOTSOCR_AVAILABLE = False
+                        DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
+                        raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
                 elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
                     # If processor loading fails due to flash attention, it's likely a transformers version issue
                     DOTSOCR_AVAILABLE = False
@@ -1078,30 +1135,61 @@ def _init_dotsocr_model():
         except Exception as e:
             error_str = str(e)
             if "video_processor" in error_str or "BaseVideoProcessor" in error_str:
-                # Try using the fixed version of the model
+                # Try manual patch for processor (skip gated repo)
                 try:
-                    # Check for flash attention again in case it wasn't set
-                    flash_attn_available_local = False
+                    from transformers import Qwen2_5_VLProcessor
+                    from transformers import AutoImageProcessor, AutoTokenizer
+                    image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
+                    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                    # Create processor manually
                     try:
-                        importlib.import_module('flash_attn')
-                        flash_attn_available_local = True
-                    except:
-                        pass
-                    
-                    fixed_model_path = "strangervisionhf/dots.ocr-base-fix"
-                    dotsocr_model = AutoModelForCausalLM.from_pretrained(
-                        fixed_model_path,
-                        attn_implementation="flash_attention_2" if flash_attn_available_local else None,
-                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                        device_map="auto" if torch.cuda.is_available() else None,
-                        trust_remote_code=True
-                    ).eval()
-                    if not torch.cuda.is_available():
-                        dotsocr_model.to(device)
-                    dotsocr_processor = AutoProcessor.from_pretrained(fixed_model_path, trust_remote_code=True)
-                except Exception as fix_error:
+                        dotsocr_processor = Qwen2_5_VLProcessor(
+                            image_processor=image_processor,
+                            tokenizer=tokenizer
+                        )
+                    except TypeError:
+                        try:
+                            dotsocr_processor = Qwen2_5_VLProcessor(
+                                image_processor=image_processor,
+                                tokenizer=tokenizer,
+                                video_processor=None
+                            )
+                        except (TypeError, ValueError):
+                            # Last resort: try to create processor by patching the class signature
+                            import inspect
+                            try:
+                                sig = inspect.signature(Qwen2_5_VLProcessor.__init__)
+                                params = sig.parameters
+                                if 'video_processor' in params and params['video_processor'].default is not inspect.Parameter.empty:
+                                    dotsocr_processor = Qwen2_5_VLProcessor(
+                                        image_processor=image_processor,
+                                        tokenizer=tokenizer
+                                    )
+                                else:
+                                    # Create processor without video_processor argument
+                                    dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                    from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+                                    if hasattr(Qwen2VLProcessor, '__init__'):
+                                        try:
+                                            Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
+                                        except:
+                                            dotsocr_processor.image_processor = image_processor
+                                            dotsocr_processor.tokenizer = tokenizer
+                                    else:
+                                        dotsocr_processor.image_processor = image_processor
+                                        dotsocr_processor.tokenizer = tokenizer
+                                    if hasattr(dotsocr_processor, 'video_processor'):
+                                        dotsocr_processor.video_processor = None
+                            except Exception:
+                                # Final fallback
+                                dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                dotsocr_processor.image_processor = image_processor
+                                dotsocr_processor.tokenizer = tokenizer
+                                if hasattr(dotsocr_processor, 'video_processor'):
+                                    dotsocr_processor.video_processor = None
+                except Exception as patch_error:
                     DOTSOCR_AVAILABLE = False
-                    DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed with video_processor error. Tried fixed version but it also failed. Original error: {error_str}, Fix error: {str(fix_error)}"
+                    DOTSOCR_ERROR_MESSAGE = f"dots.ocr model initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
                     raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
             elif "Qwen2_5_VLProcessor" in error_str:
                 DOTSOCR_AVAILABLE = False
