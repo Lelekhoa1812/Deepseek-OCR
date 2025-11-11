@@ -1,6 +1,7 @@
 # Core ML libraries - pinned for stability
 torch==2.6.0
 torchvision
+matplotlib
 transformers>=4.47.0,<5.0.0
 tokenizers>=0.21,<1.0.0
 accelerate>=0.20.0
