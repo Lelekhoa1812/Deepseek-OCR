@@ -122,16 +122,9 @@ try:
                 PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
                 
     # If PaddleOCRVL not found, check if we can use regular PaddleOCR with doc-parser features
+    # Don't create instance at import time - defer to runtime
     if not PADDLEOCRVL_AVAILABLE:
-        # Some versions might have doc-parser as a feature flag
-        try:
-            # Try to see if doc-parser is available as a parameter or method
-            test_ocr = PaddleOCR(use_angle_cls=True, lang='en')
-            # If we get here, PaddleOCR works but PaddleOCRVL might not exist
-            # We'll use regular PaddleOCR as fallback
-            PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
-        except Exception as e:
-            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(e)}"
+        PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
             
 except ImportError as e:
     PADDLEOCRVL_AVAILABLE = False
@@ -326,117 +319,124 @@ except ImportError:
     except Exception as e:
         warnings.warn(f"Could not create LlamaFlashAttention2 compatibility layer: {e}. Model loading may fail.")
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-# Set padding side early
-tokenizer.padding_side = 'right'
- 
+# Defer model and tokenizer loading to runtime to avoid import-time issues
+tokenizer = None
+model = None
+_model_loaded = False
+
 def ensure_flash_attn_if_cuda():
-    # Only attempt install when CUDA is available
+    """Check if flash attention is available, but don't install at import time"""
+    # Only check, don't install - installation should happen at runtime if needed
     if not torch.cuda.is_available():
         return False
     try:
         importlib.import_module('flash_attn')
         return True
     except Exception:
-        pass
-    try:
-        # Install without build isolation so setup can import torch
-        subprocess.check_call([
-            sys.executable, '-m', 'pip', 'install', '--no-build-isolation', '--no-cache-dir', 'flash-attn==2.7.3'
-        ])
-        importlib.invalidate_caches()
-        importlib.import_module('flash_attn')
-        return True
-    except Exception:
         return False
-flash_ok = ensure_flash_attn_if_cuda()
-model = None
-# Try loading with flash attention first if available
-if flash_ok and torch.cuda.is_available():
-    try:
-        model = AutoModel.from_pretrained(
-            MODEL_NAME,
-            _attn_implementation='flash_attention_2',
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            use_safetensors=True,
-        )
-        model = model.eval().cuda()
-    except (ImportError, AttributeError) as e:
-        error_str = str(e)
-        # If LlamaFlashAttention2 import fails, fall back to default attention
-        if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
-            warnings.warn(f"Flash attention not available due to transformers version ({error_str}); falling back to default attention.")
-            model = None  # Will be loaded below
-        else:
-            # Other import errors, try fallback
-            warnings.warn(f"Flash attention unavailable ({error_str}); falling back to default attention.")
+
+def _load_deepseek_model():
+    """Lazy initialization of DeepSeekOCR model and tokenizer"""
+    global tokenizer, model, _model_loaded
+    if _model_loaded:
+        return
+    
+    # Load tokenizer
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        tokenizer.padding_side = 'right'
+    
+    # Check flash attention availability (without installing)
+    flash_ok = ensure_flash_attn_if_cuda()
+    
+    # Try loading with flash attention first if available
+    if flash_ok and torch.cuda.is_available():
+        try:
+            model = AutoModel.from_pretrained(
+                MODEL_NAME,
+                _attn_implementation='flash_attention_2',
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                use_safetensors=True,
+            )
+            model = model.eval().cuda()
+        except (ImportError, AttributeError) as e:
+            error_str = str(e)
+            # If LlamaFlashAttention2 import fails, fall back to default attention
+            if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                warnings.warn(f"Flash attention not available due to transformers version ({error_str}); falling back to default attention.")
+                model = None  # Will be loaded below
+            else:
+                # Other import errors, try fallback
+                warnings.warn(f"Flash attention unavailable ({error_str}); falling back to default attention.")
+                model = None
+        except Exception as e:
+            warnings.warn(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
             model = None
-    except Exception as e:
-        warnings.warn(f"Flash attention/CUDA unavailable ({e}); falling back to default attention.")
-        model = None
 
-# Load with default attention if flash attention failed or wasn't attempted
-if model is None:
-    try:
-        model = AutoModel.from_pretrained(
-            MODEL_NAME,
-            _attn_implementation=None,  # Explicitly use default attention
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            trust_remote_code=True,
-            use_safetensors=True,
-        )
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        model = model.to(device).eval()
-    except (ImportError, AttributeError) as e:
-        error_str = str(e)
-        # If still failing due to LlamaFlashAttention2, try without specifying attn_implementation
-        if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
-            warnings.warn(f"Model custom code requires LlamaFlashAttention2 but it's not available. Trying without explicit attention setting.")
-            try:
-                model = AutoModel.from_pretrained(
-                    MODEL_NAME,
-                    torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                    trust_remote_code=True,
-                    use_safetensors=True,
-                )
-                device = 'cuda' if torch.cuda.is_available() else 'cpu'
-                model = model.to(device).eval()
-            except Exception as e2:
+    # Load with default attention if flash attention failed or wasn't attempted
+    if model is None:
+        try:
+            model = AutoModel.from_pretrained(
+                MODEL_NAME,
+                _attn_implementation=None,  # Explicitly use default attention
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                trust_remote_code=True,
+                use_safetensors=True,
+            )
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            model = model.to(device).eval()
+        except (ImportError, AttributeError) as e:
+            error_str = str(e)
+            # If still failing due to LlamaFlashAttention2, try without specifying attn_implementation
+            if "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
+                warnings.warn(f"Model custom code requires LlamaFlashAttention2 but it's not available. Trying without explicit attention setting.")
                 try:
-                    import transformers
-                    transformers_version = transformers.__version__
-                except:
-                    transformers_version = "unknown"
-                raise RuntimeError(f"Failed to load DeepSeekOCR model. The model's custom code requires LlamaFlashAttention2 which is not available in transformers {transformers_version}. Please upgrade transformers: pip install transformers>=4.47.0. Error: {e2}")
-        else:
+                    model = AutoModel.from_pretrained(
+                        MODEL_NAME,
+                        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                        trust_remote_code=True,
+                        use_safetensors=True,
+                    )
+                    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+                    model = model.to(device).eval()
+                except Exception as e2:
+                    try:
+                        import transformers
+                        transformers_version = transformers.__version__
+                    except:
+                        transformers_version = "unknown"
+                    raise RuntimeError(f"Failed to load DeepSeekOCR model. The model's custom code requires LlamaFlashAttention2 which is not available in transformers {transformers_version}. Please upgrade transformers: pip install transformers>=4.47.0. Error: {e2}")
+            else:
+                raise RuntimeError(f"Failed to load DeepSeekOCR model: {e}")
+        except Exception as e:
             raise RuntimeError(f"Failed to load DeepSeekOCR model: {e}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to load DeepSeekOCR model: {e}")
 
-# Configure pad token after model is loaded
-try:
-    if tokenizer.pad_token_id is None:
-        if tokenizer.eos_token_id is not None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-            tokenizer.pad_token = tokenizer.eos_token
-        else:
-            # Add a new pad token
-            tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
-            try:
-                model.resize_token_embeddings(len(tokenizer))
-            except Exception:
-                pass
-    # Ensure model config has pad_token_id set
-    if hasattr(model, 'config'):
-        if model.config.pad_token_id is None:
-            model.config.pad_token_id = tokenizer.pad_token_id
-        # Also set pad_token_id in generation config if it exists
-        if hasattr(model.config, 'generation_config') and hasattr(model.config.generation_config, 'pad_token_id'):
-            if model.config.generation_config.pad_token_id is None:
-                model.config.generation_config.pad_token_id = tokenizer.pad_token_id
-except Exception as e:
-    pass  # Suppress warnings for pad token configuration
+    # Configure pad token after model is loaded
+    try:
+        if tokenizer.pad_token_id is None:
+            if tokenizer.eos_token_id is not None:
+                tokenizer.pad_token_id = tokenizer.eos_token_id
+                tokenizer.pad_token = tokenizer.eos_token
+            else:
+                # Add a new pad token
+                tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
+                try:
+                    model.resize_token_embeddings(len(tokenizer))
+                except Exception:
+                    pass
+        # Ensure model config has pad_token_id set
+        if hasattr(model, 'config'):
+            if model.config.pad_token_id is None:
+                model.config.pad_token_id = tokenizer.pad_token_id
+            # Also set pad_token_id in generation config if it exists
+            if hasattr(model.config, 'generation_config') and hasattr(model.config.generation_config, 'pad_token_id'):
+                if model.config.generation_config.pad_token_id is None:
+                    model.config.generation_config.pad_token_id = tokenizer.pad_token_id
+    except Exception as e:
+        pass  # Suppress warnings for pad token configuration
+    
+    _model_loaded = True
 
 MODEL_CONFIGS = {
     "Gundam": {"base_size": 1024, "image_size": 640, "crop_mode": True},
@@ -653,6 +653,9 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         return " Error Upload image", "", "", None, []
     if task_label in ["Custom", "Locate"] and not custom_prompt.strip():
         return "Enter prompt", "", "", None, []
+    
+    # Lazy load model and tokenizer
+    _load_deepseek_model()
     
     if image.mode in ('RGBA', 'LA', 'P'):
         image = image.convert('RGB')
