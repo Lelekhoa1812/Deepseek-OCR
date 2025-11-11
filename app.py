@@ -122,9 +122,16 @@ try:
                 PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
                 
     # If PaddleOCRVL not found, check if we can use regular PaddleOCR with doc-parser features
-    # Don't create instance at import time - defer to runtime
     if not PADDLEOCRVL_AVAILABLE:
-        PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
+        # Some versions might have doc-parser as a feature flag
+        try:
+            # Try to see if doc-parser is available as a parameter or method
+            test_ocr = PaddleOCR(use_angle_cls=True, lang='en')
+            # If we get here, PaddleOCR works but PaddleOCRVL might not exist
+            # We'll use regular PaddleOCR as fallback
+            PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
+        except Exception as e:
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(e)}"
             
 except ImportError as e:
     PADDLEOCRVL_AVAILABLE = False
@@ -319,17 +326,26 @@ except ImportError:
     except Exception as e:
         warnings.warn(f"Could not create LlamaFlashAttention2 compatibility layer: {e}. Model loading may fail.")
 
-# Defer model and tokenizer loading to runtime to avoid import-time issues
+# Defer model and tokenizer loading to runtime to avoid build-time failures
 tokenizer = None
 model = None
 _model_loaded = False
 
 def ensure_flash_attn_if_cuda():
-    """Check if flash attention is available, but don't install at import time"""
-    # Only check, don't install - installation should happen at runtime if needed
+    # Only attempt install when CUDA is available
     if not torch.cuda.is_available():
         return False
     try:
+        importlib.import_module('flash_attn')
+        return True
+    except Exception:
+        pass
+    try:
+        # Install without build isolation so setup can import torch
+        subprocess.check_call([
+            sys.executable, '-m', 'pip', 'install', '--no-build-isolation', '--no-cache-dir', 'flash-attn==2.7.3'
+        ])
+        importlib.invalidate_caches()
         importlib.import_module('flash_attn')
         return True
     except Exception:
@@ -346,7 +362,7 @@ def _load_deepseek_model():
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
         tokenizer.padding_side = 'right'
     
-    # Check flash attention availability (without installing)
+    # Check flash attention availability
     flash_ok = ensure_flash_attn_if_cuda()
     
     # Try loading with flash attention first if available
@@ -654,7 +670,7 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     if task_label in ["Custom", "Locate"] and not custom_prompt.strip():
         return "Enter prompt", "", "", None, []
     
-    # Lazy load model and tokenizer
+    # Lazy load model and tokenizer (only when actually needed)
     _load_deepseek_model()
     
     if image.mode in ('RGBA', 'LA', 'P'):
