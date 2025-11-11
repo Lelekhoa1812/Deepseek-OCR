@@ -57,61 +57,80 @@ except (ImportError, AttributeError):
     # If DynamicCache doesn't exist or patch fails, continue anyway
     pass
 
+# Optional dependency installer (used to keep base image small on Spaces)
+_OPTIONAL_INSTALL_LOCK = Lock()
+_OPTIONAL_INSTALL_CACHE = set()
+
+def _install_optional_packages(packages, context="optional dependency"):
+    """Install optional packages lazily using pip."""
+    pending = [pkg for pkg in packages if pkg not in _OPTIONAL_INSTALL_CACHE]
+    if not pending:
+        return
+    with _OPTIONAL_INSTALL_LOCK:
+        pending = [pkg for pkg in pending if pkg not in _OPTIONAL_INSTALL_CACHE]
+        if not pending:
+            return
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", *pending])
+            _OPTIONAL_INSTALL_CACHE.update(pending)
+            importlib.invalidate_caches()
+        except Exception as install_error:
+            warnings.warn(f"Failed to install {context} packages {pending}: {install_error}")
+            raise
+
 # PaddleOCR-VL imports - try multiple import strategies
 PADDLEOCRVL_AVAILABLE = False
 PaddleOCRVL = None
 PaddleOCR = None
 PADDLEOCRVL_ERROR_MESSAGE = None
+_PADDLE_OPTIONAL_PACKAGES = [
+    os.getenv("PADDLEPADDLE_SPEC", "paddlepaddle==2.5.2"),
+    os.getenv("PADDLEOCR_SPEC", "paddleocr[doc-parser]==2.7.0"),
+]
 
-try:
-    # First, try to import regular PaddleOCR to check if package is installed
-    import paddleocr
+def _import_paddleocr():
+    global PaddleOCR, PaddleOCRVL, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE
+    try:
+        import paddleocr  # type: ignore
+    except ImportError:
+        _install_optional_packages(_PADDLE_OPTIONAL_PACKAGES, "PaddleOCR support")
+        import paddleocr  # type: ignore
     PaddleOCR = paddleocr.PaddleOCR
     
-    # Try direct import of PaddleOCRVL
     try:
-        from paddleocr import PaddleOCRVL
+        from paddleocr import PaddleOCRVL  # type: ignore
         PADDLEOCRVL_AVAILABLE = True
     except ImportError:
         try:
-            # Try alternative import path
-            from paddleocr.paddleocr_vl import PaddleOCRVL
+            from paddleocr.paddleocr_vl import PaddleOCRVL  # type: ignore
             PADDLEOCRVL_AVAILABLE = True
         except ImportError:
             try:
-                # Check if it's available as an attribute
                 if hasattr(paddleocr, 'PaddleOCRVL'):
                     PaddleOCRVL = paddleocr.PaddleOCRVL
                     PADDLEOCRVL_AVAILABLE = True
-                # Check if doc-parser provides document parsing through regular PaddleOCR
-                # In some versions, doc-parser might be accessed via PaddleOCR with special params
                 elif hasattr(paddleocr, 'paddleocr_vl'):
                     try:
-                        from paddleocr.paddleocr_vl import PaddleOCRVL
+                        from paddleocr.paddleocr_vl import PaddleOCRVL  # type: ignore
                         PADDLEOCRVL_AVAILABLE = True
-                    except:
+                    except Exception:
                         pass
             except Exception as e:
                 PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
-                
-    # If PaddleOCRVL not found, check if we can use regular PaddleOCR with doc-parser features
+    
     if not PADDLEOCRVL_AVAILABLE:
-        # Some versions might have doc-parser as a feature flag
         try:
-            # Try to see if doc-parser is available as a parameter or method
-            test_ocr = PaddleOCR(use_angle_cls=True, lang='en')
-            # If we get here, PaddleOCR works but PaddleOCRVL might not exist
-            # We'll use regular PaddleOCR as fallback
+            _ = PaddleOCR(use_angle_cls=True, lang='en')
             PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
-        except Exception as e:
-            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(e)}"
-            
-except ImportError as e:
+        except Exception as test_error:
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(test_error)}"
+
+try:
+    _import_paddleocr()
+except Exception as paddle_error:
     PADDLEOCRVL_AVAILABLE = False
-    PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR package not found. Install with: pip install 'paddleocr[doc-parser]'. Error: {str(e)}"
-except Exception as e:
-    PADDLEOCRVL_AVAILABLE = False
-    PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL setup failed: {str(e)}"
+    if not PADDLEOCRVL_ERROR_MESSAGE:
+        PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR setup failed: {paddle_error}"
 
 if not PADDLEOCRVL_AVAILABLE:
     # Provide diagnostic information
@@ -180,11 +199,19 @@ DOTSOCR_AVAILABLE = False
 DOTSOCR_MODEL = None
 DOTSOCR_PROCESSOR = None
 DOTSOCR_ERROR_MESSAGE = None
+_QWEN_OPTIONAL_PACKAGES = [
+    os.getenv("QWEN_VL_UTILS_SPEC", "qwen-vl-utils>=0.1.0"),
+]
 
 try:
     from transformers import AutoModelForCausalLM, AutoProcessor
-    from qwen_vl_utils import process_vision_info
-    DOTSOCR_AVAILABLE = True
+    try:
+        from qwen_vl_utils import process_vision_info
+        DOTSOCR_AVAILABLE = True
+    except ImportError:
+        _install_optional_packages(_QWEN_OPTIONAL_PACKAGES, "dots.ocr support (qwen-vl-utils)")
+        from qwen_vl_utils import process_vision_info  # type: ignore
+        DOTSOCR_AVAILABLE = True
 except ImportError as e:
     DOTSOCR_AVAILABLE = False
     DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {str(e)}"
