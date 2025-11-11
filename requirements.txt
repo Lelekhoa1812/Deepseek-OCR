@@ -19,7 +19,7 @@ gradio==5.49.1
 spaces>=0.40.0
 
 # Vision utilities
-# qwen-vl-utils>=0.1.0
+qwen-vl-utils
 
 # Google AI (optional - for Gemini)
 google-genai>=0.7.0
