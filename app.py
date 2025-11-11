@@ -78,8 +78,8 @@ def _install_optional_packages(packages, context="optional dependency"):
             warnings.warn(f"Failed to install {context} packages {pending}: {install_error}")
             raise
 
-# PaddleOCR-VL imports - try multiple import strategies
-PADDLEOCRVL_AVAILABLE = False
+# PaddleOCR-VL imports are deferred to reduce build-time dependencies
+PADDLEOCRVL_AVAILABLE = True
 PaddleOCRVL = None
 PaddleOCR = None
 PADDLEOCRVL_ERROR_MESSAGE = None
@@ -124,22 +124,6 @@ def _import_paddleocr():
             PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
         except Exception as test_error:
             PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(test_error)}"
-
-try:
-    _import_paddleocr()
-except Exception as paddle_error:
-    PADDLEOCRVL_AVAILABLE = False
-    if not PADDLEOCRVL_ERROR_MESSAGE:
-        PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR setup failed: {paddle_error}"
-
-if not PADDLEOCRVL_AVAILABLE:
-    # Provide diagnostic information
-    try:
-        import paddleocr
-        available_attrs = [attr for attr in dir(paddleocr) if not attr.startswith('_')]
-        warnings.warn(f"{PADDLEOCRVL_ERROR_MESSAGE or 'PaddleOCR-VL not available'}. Available PaddleOCR attributes: {', '.join(available_attrs[:10])}")
-    except:
-        warnings.warn(PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'")
 
 # Gemini imports (optional)
 try:
@@ -812,6 +796,13 @@ def process_image_paddleocrvl(image, prompt=None):
     
     # Lazy init to avoid import-time errors on some environments
     global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE, PaddleOCRVL
+    if PaddleOCR is None or PaddleOCRVL is None:
+        try:
+            _import_paddleocr()
+        except Exception as e:
+            PADDLEOCRVL_AVAILABLE = False
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL setup failed: {e}"
+    
     if not PADDLEOCRVL_AVAILABLE or PaddleOCRVL is None:
         msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
         return f" {msg}", "", "", None, []
