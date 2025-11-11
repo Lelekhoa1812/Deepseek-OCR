@@ -38,24 +38,48 @@ warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
 # Patch DynamicCache to fix 'seen_tokens' attribute error
 # This is a compatibility fix for transformers >= 4.47.0 where seen_tokens was deprecated
-try:
-    from transformers.cache_utils import DynamicCache
-    if not hasattr(DynamicCache, 'seen_tokens'):
-        # Add seen_tokens property for backward compatibility
-        def _get_seen_tokens(self):
-            """Backward compatibility property for seen_tokens"""
-            # Calculate seen_tokens from the cache structure
-            if hasattr(self, 'key_cache') and self.key_cache:
-                # Return the length of the first layer's key cache
-                first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
-                if first_layer_keys is not None and len(first_layer_keys) > 0:
-                    return first_layer_keys[0].shape[-2] if hasattr(first_layer_keys[0], 'shape') else 0
-            return 0
+# Use lazy import to avoid issues during module initialization
+def _patch_dynamic_cache():
+    """Lazy patch for DynamicCache to add seen_tokens property"""
+    try:
+        # Try multiple import paths for DynamicCache (varies by transformers version)
+        DynamicCache = None
+        try:
+            from transformers.cache_utils import DynamicCache
+        except ImportError:
+            try:
+                from transformers.utils.cache_utils import DynamicCache
+            except ImportError:
+                try:
+                    # Try importing from the main transformers module
+                    import transformers
+                    if hasattr(transformers, 'cache_utils'):
+                        from transformers.cache_utils import DynamicCache
+                    elif hasattr(transformers, 'utils') and hasattr(transformers.utils, 'cache_utils'):
+                        from transformers.utils.cache_utils import DynamicCache
+                except ImportError:
+                    pass
         
-        DynamicCache.seen_tokens = property(_get_seen_tokens)
-except (ImportError, AttributeError):
-    # If DynamicCache doesn't exist or patch fails, continue anyway
-    pass
+        if DynamicCache is not None and not hasattr(DynamicCache, 'seen_tokens'):
+            # Add seen_tokens property for backward compatibility
+            def _get_seen_tokens(self):
+                """Backward compatibility property for seen_tokens"""
+                # Calculate seen_tokens from the cache structure
+                if hasattr(self, 'key_cache') and self.key_cache:
+                    # Return the length of the first layer's key cache
+                    first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
+                    if first_layer_keys is not None and len(first_layer_keys) > 0:
+                        return first_layer_keys[0].shape[-2] if hasattr(first_layer_keys[0], 'shape') else 0
+                return 0
+            
+            DynamicCache.seen_tokens = property(_get_seen_tokens)
+    except (ImportError, AttributeError, Exception):
+        # If DynamicCache doesn't exist or patch fails, continue anyway
+        # Silently fail to avoid breaking the build process
+        pass
+
+# Call the patch function immediately (but it's wrapped in try-except)
+_patch_dynamic_cache()
 
 # PaddleOCR-VL imports - try multiple import strategies
 PADDLEOCRVL_AVAILABLE = False
