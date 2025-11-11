@@ -36,28 +36,19 @@ warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
-# DynamicCache patch - applied lazily only when needed to avoid import-time issues
-# This fixes 'seen_tokens' attribute error in transformers >= 4.47.0
+# Runtime patch for DynamicCache 'seen_tokens' error
+# Applied only when the error occurs to avoid import-time issues
 _dynamic_cache_patched = False
 
-def _ensure_dynamic_cache_patched():
-    """Lazily patch DynamicCache only when actually needed (not at import time)"""
+def _patch_dynamic_cache_if_needed():
+    """Lazily patch DynamicCache only when AttributeError occurs"""
     global _dynamic_cache_patched
     if _dynamic_cache_patched:
         return
     
     try:
-        # Try multiple import paths for DynamicCache
-        DynamicCache = None
-        try:
-            from transformers.cache_utils import DynamicCache
-        except (ImportError, AttributeError, ModuleNotFoundError):
-            try:
-                from transformers.utils.cache_utils import DynamicCache
-            except (ImportError, AttributeError, ModuleNotFoundError):
-                pass
-        
-        if DynamicCache is not None and not hasattr(DynamicCache, 'seen_tokens'):
+        from transformers.cache_utils import DynamicCache
+        if not hasattr(DynamicCache, 'seen_tokens'):
             def _get_seen_tokens(self):
                 """Backward compatibility property for seen_tokens"""
                 try:
@@ -69,14 +60,29 @@ def _ensure_dynamic_cache_patched():
                     pass
                 return 0
             
-            try:
-                DynamicCache.seen_tokens = property(_get_seen_tokens)
-                _dynamic_cache_patched = True
-            except (AttributeError, TypeError):
-                pass
-    except Exception:
-        # Silently fail - patch will be retried if needed
+            DynamicCache.seen_tokens = property(_get_seen_tokens)
+            _dynamic_cache_patched = True
+    except (ImportError, AttributeError):
         pass
+
+def _handle_dynamic_cache_error(func, *args, **kwargs):
+    """Wrapper to handle DynamicCache 'seen_tokens' AttributeError"""
+    try:
+        return func(*args, **kwargs)
+    except (AttributeError, RuntimeError) as e:
+        error_str = str(e)
+        # Check if this is the seen_tokens error (might be wrapped in RuntimeError)
+        if ("'DynamicCache' object has no attribute 'seen_tokens'" in error_str or 
+            "seen_tokens" in error_str or
+            "DynamicCache" in error_str and "seen_tokens" in error_str):
+            # Apply patch and retry
+            _patch_dynamic_cache_if_needed()
+            try:
+                return func(*args, **kwargs)
+            except (AttributeError, RuntimeError) as e2:
+                # If it still fails after patching, re-raise the original error
+                raise e
+        raise
 
 # PaddleOCR-VL imports - try multiple import strategies
 PADDLEOCRVL_AVAILABLE = False
@@ -675,12 +681,12 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     stdout = sys.stdout
     sys.stdout = StringIO()
     
-    # Ensure DynamicCache is patched before inference
-    _ensure_dynamic_cache_patched()
-    
     try:
-        model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
-                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+        _handle_dynamic_cache_error(
+            model.infer,
+            tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
+            base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"]
+        )
     except Exception as e:
         sys.stdout = stdout
         os.unlink(tmp.name)
@@ -762,8 +768,11 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
         stdout2 = sys.stdout
         sys.stdout = StringIO()
         try:
-            model.infer(tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
-                    base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"])
+            _handle_dynamic_cache_error(
+                model.infer,
+                tokenizer=tokenizer, prompt=refine_prompt, image_file=tmp2.name, output_path=out_dir2,
+                base_size=config["base_size"], image_size=config["image_size"], crop_mode=config["crop_mode"]
+            )
         except Exception:
             pass
         
@@ -847,9 +856,9 @@ def process_image_paddleocrvl(image, prompt=None):
                 ]
                 # Try if the pipeline has a chat or generate method
                 if hasattr(paddleocrvl_pipeline, 'chat'):
-                    output = paddleocrvl_pipeline.chat(messages)
+                    output = _handle_dynamic_cache_error(paddleocrvl_pipeline.chat, messages)
                 elif hasattr(paddleocrvl_pipeline, 'generate'):
-                    output = paddleocrvl_pipeline.generate(messages)
+                    output = _handle_dynamic_cache_error(paddleocrvl_pipeline.generate, messages)
                 else:
                     # Fallback to predict with just image
                     output = paddleocrvl_pipeline.predict(tmp.name)
@@ -1295,7 +1304,8 @@ def process_image_olmocr(image, prompt=None):
         
         # Generate output
         with torch.no_grad():
-            output = olmocr_model.generate(
+            output = _handle_dynamic_cache_error(
+                olmocr_model.generate,
                 **inputs,
                 temperature=0.1,
                 max_new_tokens=2048,
@@ -1417,7 +1427,10 @@ def process_image_dotsocr(image, prompt=None):
         
         # Generate output
         with torch.no_grad():
-            generated_ids = dotsocr_model.generate(**inputs, max_new_tokens=24000)
+            generated_ids = _handle_dynamic_cache_error(
+                dotsocr_model.generate,
+                **inputs, max_new_tokens=24000
+            )
         
         # Decode output
         generated_ids_trimmed = [
