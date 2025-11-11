@@ -1685,8 +1685,15 @@ def process_pdf_all_gemini(path, dpi=300, page_range_text="", insert_separators=
 
 def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=True, max_retries=3, retry_backoff_seconds=3):
     """Process PDF using PaddleOCR-VL."""
+    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE, PaddleOCRVL
+    if PaddleOCR is None or PaddleOCRVL is None:
+        try:
+            _import_paddleocr()
+        except Exception as e:
+            PADDLEOCRVL_AVAILABLE = False
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL setup failed: {e}"
     # Early exit if engine is unavailable
-    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None:
+    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None or PaddleOCRVL is None:
         msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
         return msg, f"<!-- {msg} -->", msg, None, []
     doc = fitz.open(path)
@@ -1737,8 +1744,15 @@ def process_pdf_paddleocrvl(path, dpi=300, page_indices=None, insert_separators=
 
 def process_pdf_all_paddleocrvl(path, dpi=300, page_range_text="", insert_separators=True, batch_size=3, max_retries=5, retry_backoff_seconds=5):
     """Process all pages of PDF using PaddleOCR-VL."""
+    global paddleocrvl_pipeline, PADDLEOCRVL_AVAILABLE, PADDLEOCRVL_ERROR_MESSAGE, PaddleOCRVL
+    if PaddleOCR is None or PaddleOCRVL is None:
+        try:
+            _import_paddleocr()
+        except Exception as e:
+            PADDLEOCRVL_AVAILABLE = False
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL setup failed: {e}"
     # Early exit if engine is unavailable
-    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None:
+    if not PADDLEOCRVL_AVAILABLE or paddleocrvl_pipeline is None or PaddleOCRVL is None:
         msg = PADDLEOCRVL_ERROR_MESSAGE or "PaddleOCR-VL not available. Install with: pip install 'paddleocr[doc-parser]'"
         return msg, f"<!-- {msg} -->", msg, None, []
     doc = fitz.open(path)
