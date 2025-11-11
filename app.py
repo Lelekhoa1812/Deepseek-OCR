@@ -78,6 +78,28 @@ def _install_optional_packages(packages, context="optional dependency"):
             warnings.warn(f"Failed to install {context} packages {pending}: {install_error}")
             raise
 
+
+_DEEPSEEK_OPTIONAL_PACKAGES = {
+    "matplotlib": os.getenv("DEEPSEEK_MATPLOTLIB_SPEC", "matplotlib>=3.8.0"),
+    "torchvision": os.getenv("DEEPSEEK_TORCHVISION_SPEC", "torchvision>=0.19.0"),
+}
+
+def _ensure_deepseek_visual_deps():
+    """Ensure DeepSeekOCR's optional visualization dependencies are installed."""
+    install_specs = []
+    try:
+        import matplotlib  # noqa: F401
+    except ImportError:
+        install_specs.append(_DEEPSEEK_OPTIONAL_PACKAGES["matplotlib"])
+    try:
+        import torchvision  # noqa: F401
+    except ImportError:
+        install_specs.append(_DEEPSEEK_OPTIONAL_PACKAGES["torchvision"])
+    if install_specs:
+        _install_optional_packages(install_specs, "DeepSeekOCR visual dependencies")
+        import matplotlib  # noqa: F401
+        import torchvision  # noqa: F401
+
 # PaddleOCR-VL imports are deferred to reduce build-time dependencies
 PADDLEOCRVL_AVAILABLE = True
 PaddleOCRVL = None
@@ -322,6 +344,12 @@ except ImportError:
                 llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
     except Exception as e:
         warnings.warn(f"Could not create LlamaFlashAttention2 compatibility layer: {e}. Model loading may fail.")
+
+# Ensure DeepSeek visual dependencies are ready (installs lazily if missing)
+try:
+    _ensure_deepseek_visual_deps()
+except Exception as dep_error:
+    warnings.warn(f"DeepSeekOCR dependencies missing: {dep_error}")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 # Set padding side early

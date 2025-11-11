@@ -16,7 +16,7 @@ PyMuPDF>=1.23.0
 
 # Gradio and Spaces
 gradio==5.49.1
-spaces>=0.40.0
+spaces>=0.42.0
 
 # Vision utilities
 # qwen-vl-utils
