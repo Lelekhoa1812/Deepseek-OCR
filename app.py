@@ -36,13 +36,18 @@ warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
-# Patch DynamicCache to fix 'seen_tokens' attribute error
-# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens was deprecated
-# Defer patch to avoid any import-time issues during Docker build
-def _patch_dynamic_cache():
-    """Lazy patch for DynamicCache to add seen_tokens property"""
+# DynamicCache patch - applied lazily only when needed to avoid import-time issues
+# This fixes 'seen_tokens' attribute error in transformers >= 4.47.0
+_dynamic_cache_patched = False
+
+def _ensure_dynamic_cache_patched():
+    """Lazily patch DynamicCache only when actually needed (not at import time)"""
+    global _dynamic_cache_patched
+    if _dynamic_cache_patched:
+        return
+    
     try:
-        # Try multiple import paths for DynamicCache (varies by transformers version)
+        # Try multiple import paths for DynamicCache
         DynamicCache = None
         try:
             from transformers.cache_utils import DynamicCache
@@ -50,24 +55,13 @@ def _patch_dynamic_cache():
             try:
                 from transformers.utils.cache_utils import DynamicCache
             except (ImportError, AttributeError, ModuleNotFoundError):
-                try:
-                    # Try importing from the main transformers module
-                    import transformers
-                    if hasattr(transformers, 'cache_utils'):
-                        from transformers.cache_utils import DynamicCache
-                    elif hasattr(transformers, 'utils') and hasattr(transformers.utils, 'cache_utils'):
-                        from transformers.utils.cache_utils import DynamicCache
-                except (ImportError, AttributeError, ModuleNotFoundError):
-                    pass
+                pass
         
         if DynamicCache is not None and not hasattr(DynamicCache, 'seen_tokens'):
-            # Add seen_tokens property for backward compatibility
             def _get_seen_tokens(self):
                 """Backward compatibility property for seen_tokens"""
                 try:
-                    # Calculate seen_tokens from the cache structure
                     if hasattr(self, 'key_cache') and self.key_cache:
-                        # Return the length of the first layer's key cache
                         first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
                         if first_layer_keys is not None and len(first_layer_keys) > 0:
                             return first_layer_keys[0].shape[-2] if hasattr(first_layer_keys[0], 'shape') else 0
@@ -77,21 +71,12 @@ def _patch_dynamic_cache():
             
             try:
                 DynamicCache.seen_tokens = property(_get_seen_tokens)
+                _dynamic_cache_patched = True
             except (AttributeError, TypeError):
                 pass
     except Exception:
-        # Silently fail to avoid breaking the build process
-        # Catch all exceptions to ensure this never causes import failures
+        # Silently fail - patch will be retried if needed
         pass
-
-# Defer patch execution - only run if transformers is available
-# This prevents any import-time issues during Docker build
-try:
-    import transformers
-    _patch_dynamic_cache()
-except Exception:
-    # If transformers isn't available yet, the patch will be applied later when needed
-    pass
 
 # PaddleOCR-VL imports - try multiple import strategies
 PADDLEOCRVL_AVAILABLE = False
@@ -689,6 +674,9 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     
     stdout = sys.stdout
     sys.stdout = StringIO()
+    
+    # Ensure DynamicCache is patched before inference
+    _ensure_dynamic_cache_patched()
     
     try:
         model.infer(tokenizer=tokenizer, prompt=prompt, image_file=tmp.name, output_path=out_dir,
