@@ -1,0 +1,56 @@
+# Hugging Face Spaces ignore file
+# This helps reduce build context and deployment size
+
+# Local test files
+local/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git files (already handled by HF)
+.git/
+
+# Documentation (keep README)
+docs/
+*.md
+!README.md
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
+
+# Environment files
+.env.local
+
+# Large model files (downloaded at runtime)
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+checkpoints/
+

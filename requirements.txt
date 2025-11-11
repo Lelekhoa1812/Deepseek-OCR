@@ -1,21 +1,37 @@
+# Core ML libraries - pinned for stability
 torch==2.6.0
-transformers>=4.47.0
-tokenizers>=0.21
-accelerate
-einops
-addict 
-matplotlib
-easydict
-torchvision
-PyMuPDF
-hf_transfer
-paddleocr[doc-parser]
-paddlepaddle
+transformers>=4.47.0,<5.0.0
+tokenizers>=0.21,<1.0.0
+accelerate>=0.20.0
+einops>=0.7.0
+
+# Image processing
+Pillow>=10.0.0
+numpy>=1.24.0,<2.0.0
+PyMuPDF>=1.23.0
+
+# OCR libraries
+paddleocr[doc-parser]>=2.7.0
+paddlepaddle>=2.5.0
+
+# Gradio and Spaces
 gradio==5.49.1
-spaces
+spaces>=0.40.0
+
+# Vision utilities
+qwen-vl-utils>=0.1.0
+
+# Google AI (optional - for Gemini)
 google-genai>=0.7.0
-Pillow
-numpy
-# olmocr requires Python >=3.11 - install conditionally in code if Python >=3.11
+
+# Utilities
+addict>=2.4.0
+easydict>=1.9
+hf_transfer>=0.1.0
+
+# Optional: matplotlib only if needed for visualization
+# matplotlib>=3.7.0
+
+# Note: torchvision is included with torch, no need to install separately
+# Note: olmocr requires Python >=3.11 - install conditionally in code if Python >=3.11
 # git+https://github.com/allenai/olmocr.git
-qwen-vl-utils

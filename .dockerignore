@@ -1,0 +1,88 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local test files
+local/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.md
+!README.md
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.log
+
+# Documentation (keep README)
+docs/
+*.md
+!README.md
+
+# Test files
+test/
+tests/
+*_test.py
+test_*.py
+
+# Build artifacts
+*.whl
+*.tar.gz
+
+# Environment files (sensitive)
+.env
+.env.local
+
+# Large model files (will be downloaded at runtime)
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+checkpoints/
+
+# Cache directories
+.cache/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# OS files
+Thumbs.db
+.DS_Store
+
