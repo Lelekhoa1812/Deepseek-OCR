@@ -179,7 +179,7 @@ except Exception as e:
     warnings.warn(OLMOCR_ERROR_MESSAGE)
 
 # dots.ocr imports (optional)
-DOTSOCR_AVAILABLE = False
+DOTSOCR_AVAILABLE = True
 DOTSOCR_MODEL = None
 DOTSOCR_PROCESSOR = None
 DOTSOCR_ERROR_MESSAGE = None
@@ -189,21 +189,34 @@ _QWEN_OPTIONAL_PACKAGES = [
 
 try:
     from transformers import AutoModelForCausalLM, AutoProcessor
-    try:
-        from qwen_vl_utils import process_vision_info
-        DOTSOCR_AVAILABLE = True
-    except ImportError:
-        _install_optional_packages(_QWEN_OPTIONAL_PACKAGES, "dots.ocr support (qwen-vl-utils)")
-        from qwen_vl_utils import process_vision_info  # type: ignore
-        DOTSOCR_AVAILABLE = True
 except ImportError as e:
     DOTSOCR_AVAILABLE = False
-    DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {str(e)}"
+    DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install transformers. Error: {str(e)}"
     warnings.warn(DOTSOCR_ERROR_MESSAGE)
 except Exception as e:
     DOTSOCR_AVAILABLE = False
     DOTSOCR_ERROR_MESSAGE = f"dots.ocr setup failed: {str(e)}"
     warnings.warn(DOTSOCR_ERROR_MESSAGE)
+
+process_vision_info = None
+
+def _ensure_dotsocr_dependencies():
+    """Ensure qwen-vl-utils is available before using dots.ocr."""
+    global process_vision_info, DOTSOCR_AVAILABLE, DOTSOCR_ERROR_MESSAGE
+    if process_vision_info is not None:
+        return
+    try:
+        from qwen_vl_utils import process_vision_info as _process_vision_info
+        process_vision_info = _process_vision_info
+    except ImportError:
+        try:
+            _install_optional_packages(_QWEN_OPTIONAL_PACKAGES, "dots.ocr support (qwen-vl-utils)")
+            from qwen_vl_utils import process_vision_info as _process_vision_info  # type: ignore
+            process_vision_info = _process_vision_info
+        except Exception as install_error:
+            DOTSOCR_AVAILABLE = False
+            DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {install_error}"
+            raise
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -986,6 +999,11 @@ def _init_dotsocr_model():
     if not DOTSOCR_AVAILABLE:
         msg = DOTSOCR_ERROR_MESSAGE or "dots.ocr not available. Install with: pip install qwen-vl-utils"
         raise RuntimeError(msg)
+    
+    try:
+        _ensure_dotsocr_dependencies()
+    except Exception as dep_error:
+        raise RuntimeError(str(dep_error))
     
     if dotsocr_model is None or dotsocr_processor is None:
         try:
