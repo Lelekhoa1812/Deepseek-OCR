@@ -121,17 +121,9 @@ try:
             except Exception as e:
                 PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
                 
-    # If PaddleOCRVL not found, check if we can use regular PaddleOCR with doc-parser features
+    # If PaddleOCRVL not found, set error message (don't test at import time)
     if not PADDLEOCRVL_AVAILABLE:
-        # Some versions might have doc-parser as a feature flag
-        try:
-            # Try to see if doc-parser is available as a parameter or method
-            test_ocr = PaddleOCR(use_angle_cls=True, lang='en')
-            # If we get here, PaddleOCR works but PaddleOCRVL might not exist
-            # We'll use regular PaddleOCR as fallback
-            PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
-        except Exception as e:
-            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR not working: {str(e)}"
+        PADDLEOCRVL_ERROR_MESSAGE = "PaddleOCR-VL class not found. Using regular PaddleOCR instead. For document parsing, ensure 'paddleocr[doc-parser]' is installed."
             
 except ImportError as e:
     PADDLEOCRVL_AVAILABLE = False
