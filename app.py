@@ -1262,62 +1262,62 @@ def _init_dotsocr_model():
                             image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
                             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
                             # Create processor manually with video_processor=None
-                        # Qwen2_5_VLProcessor may require video_processor, so we create a dummy one if needed
-                        try:
-                            dotsocr_processor = Qwen2_5_VLProcessor(
-                                image_processor=image_processor,
-                                tokenizer=tokenizer
-                            )
-                        except TypeError:
-                            # If video_processor is required, try to create a minimal one or pass None explicitly
-                            # Some versions may accept None, others may need a dummy processor
+                            # Qwen2_5_VLProcessor may require video_processor, so we create a dummy one if needed
                             try:
-                                # Try with explicit None
-                            dotsocr_processor = Qwen2_5_VLProcessor(
-                                image_processor=image_processor,
-                                tokenizer=tokenizer,
-                                video_processor=None
-                            )
-                            except (TypeError, ValueError):
-                                # Last resort: try to create processor by patching the class signature
-                                # Check if we can inspect the __init__ signature
-                                import inspect
+                                dotsocr_processor = Qwen2_5_VLProcessor(
+                                    image_processor=image_processor,
+                                    tokenizer=tokenizer
+                                )
+                            except TypeError:
+                            # If video_processor is required, try to create a minimal one or pass None explicitly
+                                # Some versions may accept None, others may need a dummy processor
                                 try:
-                                    sig = inspect.signature(Qwen2_5_VLProcessor.__init__)
-                                    # If video_processor has a default, we can call it
-                                    params = sig.parameters
-                                    if 'video_processor' in params and params['video_processor'].default is not inspect.Parameter.empty:
-                                        # video_processor has a default, call normally
-                                        dotsocr_processor = Qwen2_5_VLProcessor(
-                                            image_processor=image_processor,
-                                            tokenizer=tokenizer
-                                        )
-                                    else:
-                                        # Need to patch the class to accept None
-                                        # Create processor without video_processor argument
-                                        dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
-                                        # Try to call parent __init__ if available
-                                        from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
-                                        if hasattr(Qwen2VLProcessor, '__init__'):
-                                            try:
-                                                Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
-                                            except:
-                                                # Fallback to manual assignment
+                                    # Try with explicit None
+                                dotsocr_processor = Qwen2_5_VLProcessor(
+                                    image_processor=image_processor,
+                                    tokenizer=tokenizer,
+                                    video_processor=None
+                                )
+                                except (TypeError, ValueError):
+                                    # Last resort: try to create processor by patching the class signature
+                                    # Check if we can inspect the __init__ signature
+                                    import inspect
+                                    try:
+                                        sig = inspect.signature(Qwen2_5_VLProcessor.__init__)
+                                        # If video_processor has a default, we can call it
+                                        params = sig.parameters
+                                        if 'video_processor' in params and params['video_processor'].default is not inspect.Parameter.empty:
+                                            # video_processor has a default, call normally
+                                            dotsocr_processor = Qwen2_5_VLProcessor(
+                                                image_processor=image_processor,
+                                                tokenizer=tokenizer
+                                            )
+                                        else:
+                                            # Need to patch the class to accept None
+                                            # Create processor without video_processor argument
+                                            dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                            # Try to call parent __init__ if available
+                                            from transformers.models.qwen2_vl.processing_qwen2_vl import Qwen2VLProcessor
+                                            if hasattr(Qwen2VLProcessor, '__init__'):
+                                                try:
+                                                    Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
+                                                except:
+                                                    # Fallback to manual assignment
+                                                    dotsocr_processor.image_processor = image_processor
+                                                    dotsocr_processor.tokenizer = tokenizer
+                                            else:
                                                 dotsocr_processor.image_processor = image_processor
                                                 dotsocr_processor.tokenizer = tokenizer
-                                        else:
-                                            dotsocr_processor.image_processor = image_processor
-                                            dotsocr_processor.tokenizer = tokenizer
-                                        # Set video_processor to None if the attribute exists
+                                            # Set video_processor to None if the attribute exists
+                                            if hasattr(dotsocr_processor, 'video_processor'):
+                                                dotsocr_processor.video_processor = None
+                                    except Exception:
+                                        # Final fallback: create processor without video_processor argument
+                                        dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
+                                        dotsocr_processor.image_processor = image_processor
+                                        dotsocr_processor.tokenizer = tokenizer
                                         if hasattr(dotsocr_processor, 'video_processor'):
                                             dotsocr_processor.video_processor = None
-                                except Exception:
-                                    # Final fallback: create processor without video_processor argument
-                                    dotsocr_processor = Qwen2_5_VLProcessor.__new__(Qwen2_5_VLProcessor)
-                                    dotsocr_processor.image_processor = image_processor
-                                    dotsocr_processor.tokenizer = tokenizer
-                                    if hasattr(dotsocr_processor, 'video_processor'):
-                                        dotsocr_processor.video_processor = None
                         except Exception as patch_error:
                             DOTSOCR_AVAILABLE = False
                         DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
