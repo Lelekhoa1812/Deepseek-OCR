@@ -31,15 +31,18 @@ warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
 warnings.filterwarnings("ignore", message=".*attention mask.*")
 warnings.filterwarnings("ignore", message=".*pad token.*")
 warnings.filterwarnings("ignore", message=".*seen_tokens.*")
+warnings.filterwarnings("ignore", message=".*get_usable_length.*")
 warnings.filterwarnings("ignore", message=".*get_max_cache.*")
+warnings.filterwarnings("ignore", message=".*get_seq_length.*")
 warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
 # Patch DynamicCache to fix deprecated attribute errors
-# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens and get_max_length were deprecated
+# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens, get_max_length, and get_usable_length were deprecated
 try:
     from transformers.cache_utils import DynamicCache
+    
     if not hasattr(DynamicCache, 'seen_tokens'):
         # Add seen_tokens property for backward compatibility
         def _get_seen_tokens(self):
@@ -76,6 +79,61 @@ try:
             return 0
         
         DynamicCache.get_max_length = _get_max_length
+    
+    if not hasattr(DynamicCache, 'get_usable_length'):
+        # Add get_usable_length method for backward compatibility
+        # In newer transformers, this was replaced with get_seq_length or similar
+        def _get_usable_length(self, seq_length=None):
+            """Backward compatibility method for get_usable_length
+            
+            Args:
+                seq_length: Optional sequence length parameter (for compatibility with old API)
+            """
+            # Try to use get_seq_length if available (newer API)
+            if hasattr(self, 'get_seq_length'):
+                try:
+                    return self.get_seq_length()
+                except:
+                    pass
+            
+            # Try to get usable length from cache structure
+            if hasattr(self, 'key_cache') and self.key_cache:
+                first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
+                if first_layer_keys is not None and len(first_layer_keys) > 0:
+                    # Return the sequence length dimension
+                    if hasattr(first_layer_keys[0], 'shape') and len(first_layer_keys[0].shape) >= 2:
+                        cache_length = first_layer_keys[0].shape[-2]
+                        # If seq_length is provided, return the minimum (usable portion)
+                        if seq_length is not None:
+                            return min(cache_length, seq_length)
+                        return cache_length
+            
+            # Fallback: try cache_position if available (newer API)
+            if hasattr(self, 'cache_position') and self.cache_position is not None:
+                if hasattr(self.cache_position, '__len__'):
+                    pos_len = len(self.cache_position)
+                    if seq_length is not None:
+                        return min(pos_len, seq_length)
+                    return pos_len
+                elif hasattr(self.cache_position, 'shape'):
+                    pos_len = self.cache_position.shape[-1] if len(self.cache_position.shape) > 0 else 0
+                    if seq_length is not None:
+                        return min(pos_len, seq_length)
+                    return pos_len
+            
+            # If seq_length is provided, return it; otherwise return 0
+            return seq_length if seq_length is not None else 0
+        
+        DynamicCache.get_usable_length = _get_usable_length
+    
+    # Also add get_seq_length as an alias if it doesn't exist and get_usable_length does
+    if not hasattr(DynamicCache, 'get_seq_length') and hasattr(DynamicCache, 'get_usable_length'):
+        def _get_seq_length(self):
+            """Backward compatibility method for get_seq_length (alias for get_usable_length)"""
+            return self.get_usable_length()
+        
+        DynamicCache.get_seq_length = _get_seq_length
+        
 except (ImportError, AttributeError):
     # If DynamicCache doesn't exist or patch fails, continue anyway
     pass
