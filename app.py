@@ -152,8 +152,45 @@ def _install_optional_packages(packages, context="optional dependency"):
         if not pending:
             return
         try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", *pending])
-            _OPTIONAL_INSTALL_CACHE.update(pending)
+            # Try installing packages one by one for better error reporting
+            for pkg in pending:
+                try:
+                    subprocess.check_call(
+                        [sys.executable, "-m", "pip", "install", "--no-cache-dir", pkg],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE
+                    )
+                    _OPTIONAL_INSTALL_CACHE.add(pkg)
+                except subprocess.CalledProcessError as e:
+                    stderr_output = e.stderr.decode('utf-8') if e.stderr else str(e)
+                    error_msg = f"Failed to install {pkg}: {stderr_output}"
+                    warnings.warn(f"{context} - {error_msg}")
+                    # For PaddleOCR, try without version constraints
+                    if "paddle" in pkg.lower():
+                        try:
+                            # Try installing paddlepaddle first, then paddleocr
+                            if "paddlepaddle" in pkg:
+                                subprocess.check_call(
+                                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "paddlepaddle"],
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE
+                                )
+                                _OPTIONAL_INSTALL_CACHE.add("paddlepaddle")
+                            elif "paddleocr" in pkg:
+                                # Try installing paddleocr without doc-parser first
+                                try:
+                                    subprocess.check_call(
+                                        [sys.executable, "-m", "pip", "install", "--no-cache-dir", "paddleocr"],
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    _OPTIONAL_INSTALL_CACHE.add("paddleocr")
+                                except:
+                                    raise
+                        except Exception:
+                            raise RuntimeError(f"{context} - Failed to install {pkg}. Error: {error_msg}")
+                    else:
+                        raise RuntimeError(f"{context} - Failed to install {pkg}. Error: {error_msg}")
             importlib.invalidate_caches()
         except Exception as install_error:
             warnings.warn(f"Failed to install {context} packages {pending}: {install_error}")
@@ -187,8 +224,8 @@ PaddleOCRVL = None
 PaddleOCR = None
 PADDLEOCRVL_ERROR_MESSAGE = None
 _PADDLE_OPTIONAL_PACKAGES = [
-    os.getenv("PADDLEPADDLE_SPEC", "paddlepaddle==2.5.2"),
-    os.getenv("PADDLEOCR_SPEC", "paddleocr[doc-parser]==2.7.0"),
+    os.getenv("PADDLEPADDLE_SPEC", "paddlepaddle>=2.5.0"),
+    os.getenv("PADDLEOCR_SPEC", "paddleocr[doc-parser]>=2.7.0"),
 ]
 
 def _import_paddleocr():
@@ -196,8 +233,13 @@ def _import_paddleocr():
     try:
         import paddleocr  # type: ignore
     except ImportError:
-        _install_optional_packages(_PADDLE_OPTIONAL_PACKAGES, "PaddleOCR support")
-        import paddleocr  # type: ignore
+        try:
+            _install_optional_packages(_PADDLE_OPTIONAL_PACKAGES, "PaddleOCR support")
+            import paddleocr  # type: ignore
+        except Exception as install_error:
+            PADDLEOCRVL_AVAILABLE = False
+            PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR installation failed: {install_error}. Try installing manually: pip install paddlepaddle paddleocr[doc-parser]"
+            raise RuntimeError(PADDLEOCRVL_ERROR_MESSAGE)
     PaddleOCR = paddleocr.PaddleOCR
     
     try:
@@ -292,7 +334,7 @@ DOTSOCR_MODEL = None
 DOTSOCR_PROCESSOR = None
 DOTSOCR_ERROR_MESSAGE = None
 _QWEN_OPTIONAL_PACKAGES = [
-    os.getenv("QWEN_VL_UTILS_SPEC", "qwen-vl-utils>=0.1.0"),
+    os.getenv("QWEN_VL_UTILS_SPEC", "qwen-vl-utils"),
 ]
 
 try:
@@ -323,8 +365,13 @@ def _ensure_dotsocr_dependencies():
             process_vision_info = _process_vision_info
         except Exception as install_error:
             DOTSOCR_AVAILABLE = False
-            DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {install_error}"
-            raise
+            error_msg = str(install_error)
+            # Provide more helpful error message
+            if "returned non-zero exit status" in error_msg:
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. qwen-vl-utils installation failed. Try installing manually: pip install qwen-vl-utils. Error: {error_msg}"
+            else:
+                DOTSOCR_ERROR_MESSAGE = f"dots.ocr not available. Install with: pip install qwen-vl-utils. Error: {error_msg}"
+            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -705,6 +752,9 @@ def extract_grounding_references(text):
     return re.findall(pattern, text, re.DOTALL)
 
 def draw_bounding_boxes(image, refs, extract_images=False):
+    if not refs or len(refs) == 0:
+        return image.copy(), []
+    
     img_w, img_h = image.size
     img_draw = image.copy()
     draw = ImageDraw.Draw(img_draw)
@@ -714,26 +764,42 @@ def draw_bounding_boxes(image, refs, extract_images=False):
     crops = []
     
     for ref in refs:
-        label = ref[1]
-        coords = eval(ref[2])
+        if not ref or len(ref) < 3:
+            continue
+        try:
+            label = ref[1] if len(ref) > 1 else 'unknown'
+            coords_str = ref[2] if len(ref) > 2 else '[]'
+            coords = eval(coords_str) if coords_str else []
+            if not coords or not isinstance(coords, (list, tuple)):
+                continue
+        except Exception as e:
+            warnings.warn(f"Failed to parse ref {ref}: {e}")
+            continue
+        
         color = (np.random.randint(50, 255), np.random.randint(50, 255), np.random.randint(50, 255))
         color_a = color + (60,)
         
         for box in coords:
-            x1, y1, x2, y2 = int(box[0]/999*img_w), int(box[1]/999*img_h), int(box[2]/999*img_w), int(box[3]/999*img_h)
-            
-            if extract_images and label == 'image':
-                crops.append(image.crop((x1, y1, x2, y2)))
-            
-            width = 5 if label == 'title' else 3
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
-            draw2.rectangle([x1, y1, x2, y2], fill=color_a)
-            
-            text_bbox = draw.textbbox((0, 0), label, font=font)
-            tw, th = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
-            ty = max(0, y1 - 20)
-            draw.rectangle([x1, ty, x1 + tw + 4, ty + th + 4], fill=color)
-            draw.text((x1 + 2, ty + 2), label, font=font, fill=(255, 255, 255))
+            if not box or len(box) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = int(box[0]/999*img_w), int(box[1]/999*img_h), int(box[2]/999*img_w), int(box[3]/999*img_h)
+                
+                if extract_images and label == 'image':
+                    crops.append(image.crop((x1, y1, x2, y2)))
+                
+                width = 5 if label == 'title' else 3
+                draw.rectangle([x1, y1, x2, y2], outline=color, width=width)
+                draw2.rectangle([x1, y1, x2, y2], fill=color_a)
+                
+                text_bbox = draw.textbbox((0, 0), label, font=font)
+                tw, th = text_bbox[2] - text_bbox[0], text_bbox[3] - text_bbox[1]
+                ty = max(0, y1 - 20)
+                draw.rectangle([x1, ty, x1 + tw + 4, ty + th + 4], fill=color)
+                draw.text((x1 + 2, ty + 2), label, font=font, fill=(255, 255, 255))
+            except Exception as e:
+                warnings.warn(f"Failed to draw box {box}: {e}")
+                continue
     
     img_draw.paste(overlay, (0, 0), overlay)
     return img_draw, crops
@@ -923,8 +989,13 @@ def process_image(image, mode_label, task_label, custom_prompt, embed_figures=Fa
     
     if has_grounding and '<|ref|>' in result:
         refs = extract_grounding_references(result)
-        if refs:
-            img_out, crops = draw_bounding_boxes(image, refs, True)
+        if refs and len(refs) > 0:
+            try:
+                img_out, crops = draw_bounding_boxes(image, refs, True)
+            except Exception as e:
+                warnings.warn(f"Failed to draw bounding boxes: {e}")
+                img_out = None
+                crops = []
     
     if embed_figures:
         markdown = embed_images(markdown, crops)
