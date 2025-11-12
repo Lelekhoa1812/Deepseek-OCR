@@ -1273,11 +1273,11 @@ def _init_dotsocr_model():
                                 # Some versions may accept None, others may need a dummy processor
                                 try:
                                     # Try with explicit None
-                                dotsocr_processor = Qwen2_5_VLProcessor(
-                                    image_processor=image_processor,
-                                    tokenizer=tokenizer,
-                                    video_processor=None
-                                )
+                                    dotsocr_processor = Qwen2_5_VLProcessor(
+                                        image_processor=image_processor,
+                                        tokenizer=tokenizer,
+                                        video_processor=None
+                                    )
                                 except (TypeError, ValueError):
                                     # Last resort: try to create processor by patching the class signature
                                     # Check if we can inspect the __init__ signature
@@ -1320,7 +1320,7 @@ def _init_dotsocr_model():
                                             dotsocr_processor.video_processor = None
                         except Exception as patch_error:
                             DOTSOCR_AVAILABLE = False
-                        DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
+                            DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
                             raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
                 elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
                     # If processor loading fails due to flash attention, it's likely a transformers version issue
@@ -1385,7 +1385,7 @@ def _init_dotsocr_model():
                                     if hasattr(Qwen2VLProcessor, '__init__'):
                                         try:
                                             Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
-                    except:
+                                        except Exception:
                                             dotsocr_processor.image_processor = image_processor
                                             dotsocr_processor.tokenizer = tokenizer
                                     else:
