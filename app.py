@@ -36,8 +36,8 @@ warnings.filterwarnings("ignore", message=".*position_ids.*")
 warnings.filterwarnings("ignore", message=".*position_embeddings.*")
 warnings.filterwarnings("ignore", message=".*Setting `pad_token_id`.*")
 
-# Patch DynamicCache to fix 'seen_tokens' attribute error
-# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens was deprecated
+# Patch DynamicCache to fix deprecated attribute errors
+# This is a compatibility fix for transformers >= 4.47.0 where seen_tokens and get_max_length were deprecated
 try:
     from transformers.cache_utils import DynamicCache
     if not hasattr(DynamicCache, 'seen_tokens'):
@@ -53,6 +53,29 @@ try:
             return 0
         
         DynamicCache.seen_tokens = property(_get_seen_tokens)
+    
+    if not hasattr(DynamicCache, 'get_max_length'):
+        # Add get_max_length method for backward compatibility
+        # In newer transformers, this was replaced with cache_position or similar
+        def _get_max_length(self):
+            """Backward compatibility method for get_max_length"""
+            # Try to get max length from cache structure
+            if hasattr(self, 'key_cache') and self.key_cache:
+                first_layer_keys = list(self.key_cache.values())[0] if self.key_cache else None
+                if first_layer_keys is not None and len(first_layer_keys) > 0:
+                    # Return the sequence length dimension
+                    if hasattr(first_layer_keys[0], 'shape') and len(first_layer_keys[0].shape) >= 2:
+                        return first_layer_keys[0].shape[-2]
+            # Fallback: try cache_position if available (newer API)
+            if hasattr(self, 'cache_position') and self.cache_position is not None:
+                if hasattr(self.cache_position, '__len__'):
+                    return len(self.cache_position)
+                elif hasattr(self.cache_position, 'shape'):
+                    return self.cache_position.shape[-1] if len(self.cache_position.shape) > 0 else 0
+            # Default fallback
+            return 0
+        
+        DynamicCache.get_max_length = _get_max_length
 except (ImportError, AttributeError):
     # If DynamicCache doesn't exist or patch fails, continue anyway
     pass
@@ -191,7 +214,12 @@ except ImportError as e:
     OLMOCR_AVAILABLE = False
     python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
     if sys.version_info < (3, 11):
-        OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python >=3.11, but you have Python {python_version}. For Hugging Face Spaces, create a runtime.txt file with 'python-3.11' or higher"
+        # Check if we're on ZeroGPU (which is locked to Python 3.10.13)
+        is_zerogpu = os.getenv("SPACES_ZERO_GPU", "").lower() in ("true", "1") or "zerogpu" in os.getenv("SPACE_ID", "").lower()
+        if is_zerogpu:
+            OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python >=3.11, but ZeroGPU Spaces are locked to Python 3.10.13. olmOCR is not available on ZeroGPU. Use a regular GPU Space or a different OCR engine."
+        else:
+            OLMOCR_ERROR_MESSAGE = f"olmOCR requires Python >=3.11, but you have Python {python_version}. For Hugging Face Spaces, create a runtime.txt file with 'python-3.11' or higher. Note: ZeroGPU Spaces are locked to Python 3.10.13 and do not support olmOCR."
     else:
         OLMOCR_ERROR_MESSAGE = f"olmOCR not available. Install with: pip install git+https://github.com/allenai/olmocr.git. Error: {str(e)}"
     warnings.warn(OLMOCR_ERROR_MESSAGE)

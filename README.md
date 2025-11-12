@@ -22,4 +22,7 @@ hf_ignore:
   - ".git/**"
   - "test/**"
   - "tests/**"
+# Note: ZeroGPU Spaces are currently locked to Python 3.10.13
+# This cannot be overridden even if runtime.txt specifies a different version
+# olmOCR requires Python >= 3.11, so it will be disabled on ZeroGPU Spaces
 ---
