@@ -220,7 +220,7 @@ def _import_paddleocr():
                         pass
             except Exception as e:
                 PADDLEOCRVL_ERROR_MESSAGE = f"PaddleOCR-VL import failed: {str(e)}"
-    
+                
     if not PADDLEOCRVL_AVAILABLE:
         try:
             _ = PaddleOCR(use_angle_cls=True, lang='en')
@@ -403,31 +403,94 @@ MODEL_NAME = 'deepseek-ai/DeepSeek-OCR'
 try:
     from transformers.models.llama.modeling_llama import LlamaFlashAttention2
 except ImportError:
-    # LlamaFlashAttention2 doesn't exist, create a compatibility alias
+    # LlamaFlashAttention2 doesn't exist, create a compatibility wrapper
     try:
         import transformers.models.llama.modeling_llama as llama_module
-        # Try to use LlamaSdpaAttention or LlamaAttention as fallback
+        import inspect
+        
+        # Try to use LlamaSdpaAttention or LlamaAttention as base
+        BaseAttention = None
         if hasattr(llama_module, 'LlamaSdpaAttention'):
-            # Use LlamaSdpaAttention as a compatibility alias
-            llama_module.LlamaFlashAttention2 = llama_module.LlamaSdpaAttention
+            BaseAttention = llama_module.LlamaSdpaAttention
         elif hasattr(llama_module, 'LlamaAttention'):
-            # Use LlamaAttention as a compatibility alias
-            llama_module.LlamaFlashAttention2 = llama_module.LlamaAttention
+            BaseAttention = llama_module.LlamaAttention
+        
+        if BaseAttention is not None:
+            # Create a compatibility wrapper class that handles signature differences
+            class LlamaFlashAttention2(BaseAttention):
+                """Compatibility wrapper for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
+                
+                def forward(self, hidden_states, attention_mask=None, position_ids=None, 
+                          past_key_value=None, output_attentions=False, use_cache=False,
+                          cache_position=None, position_embeddings=None, **kwargs):
+                    """
+                    Forward method that adapts between old LlamaFlashAttention2 signature
+                    and new LlamaAttention signature.
+                    """
+                    # Get the signature of the parent class forward method
+                    parent_forward = super().forward
+                    sig = inspect.signature(parent_forward)
+                    params = sig.parameters
+                    
+                    # Build arguments dict, excluding 'self'
+                    forward_kwargs = {
+                        'hidden_states': hidden_states,
+                    }
+                    
+                    # Add optional arguments only if they're in the parent signature
+                    if 'attention_mask' in params:
+                        forward_kwargs['attention_mask'] = attention_mask
+                    if 'position_ids' in params:
+                        forward_kwargs['position_ids'] = position_ids
+                    if 'past_key_value' in params:
+                        forward_kwargs['past_key_value'] = past_key_value
+                    if 'output_attentions' in params:
+                        forward_kwargs['output_attentions'] = output_attentions
+                    if 'use_cache' in params:
+                        forward_kwargs['use_cache'] = use_cache
+                    if 'cache_position' in params:
+                        forward_kwargs['cache_position'] = cache_position
+                    
+                    # Handle position_embeddings - critical for compatibility
+                    if 'position_embeddings' in params:
+                        # Parent accepts position_embeddings
+                        param = params['position_embeddings']
+                        if position_embeddings is not None:
+                            forward_kwargs['position_embeddings'] = position_embeddings
+                        elif param.default is inspect.Parameter.empty:
+                            # Required parameter but not provided - try to generate it
+                            if hasattr(self, 'rotary_emb') and position_ids is not None:
+                                try:
+                                    # Generate position embeddings using rotary_emb
+                                    forward_kwargs['position_embeddings'] = self.rotary_emb(
+                                        hidden_states, position_ids=position_ids
+                                    )
+                                except Exception:
+                                    # If generation fails, pass None and let parent handle it
+                                    forward_kwargs['position_embeddings'] = None
+                            else:
+                                # Can't generate, pass None and hope parent can handle it
+                                forward_kwargs['position_embeddings'] = None
+                        # If it has a default, we don't need to pass it
+                    # If parent doesn't accept position_embeddings, we ignore it
+                    # (parent will generate it internally from position_ids)
+                    
+                    # Add any additional kwargs that parent accepts
+                    for key, value in kwargs.items():
+                        if key in params:
+                            forward_kwargs[key] = value
+                    
+                    # Call parent forward with adapted arguments
+                    return parent_forward(**forward_kwargs)
+            
+            llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
         else:
-            # Create a minimal compatibility class that inherits from LlamaAttention if available
-            try:
-                from transformers.models.llama.modeling_llama import LlamaAttention
-                class LlamaFlashAttention2(LlamaAttention):
-                    """Compatibility alias for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
+            # Last resort: create a minimal dummy class
+            class LlamaFlashAttention2:
+                """Compatibility alias for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
+                def __init__(self, *args, **kwargs):
                     pass
-                llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
-            except:
-                # Last resort: create a minimal dummy class
-                class LlamaFlashAttention2:
-                    """Compatibility alias for LlamaFlashAttention2 (removed in transformers 4.47.0+)"""
-                    def __init__(self, *args, **kwargs):
-                        pass
-                llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
+            llama_module.LlamaFlashAttention2 = LlamaFlashAttention2
     except Exception as e:
         warnings.warn(f"Could not create LlamaFlashAttention2 compatibility layer: {e}. Model loading may fail.")
 
@@ -1193,12 +1256,12 @@ def _init_dotsocr_model():
                 # Handle video_processor error - use manual patch (skip gated repo)
                 if "video_processor" in error_str or "BaseVideoProcessor" in error_str:
                     # Try manual patch first (skip gated repo to avoid access issues)
-                    try:
-                        from transformers import Qwen2_5_VLProcessor
-                        from transformers import AutoImageProcessor, AutoTokenizer
-                        image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
-                        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-                        # Create processor manually with video_processor=None
+                        try:
+                            from transformers import Qwen2_5_VLProcessor
+                            from transformers import AutoImageProcessor, AutoTokenizer
+                            image_processor = AutoImageProcessor.from_pretrained(model_path, trust_remote_code=True)
+                            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                            # Create processor manually with video_processor=None
                         # Qwen2_5_VLProcessor may require video_processor, so we create a dummy one if needed
                         try:
                             dotsocr_processor = Qwen2_5_VLProcessor(
@@ -1210,11 +1273,11 @@ def _init_dotsocr_model():
                             # Some versions may accept None, others may need a dummy processor
                             try:
                                 # Try with explicit None
-                                dotsocr_processor = Qwen2_5_VLProcessor(
-                                    image_processor=image_processor,
-                                    tokenizer=tokenizer,
-                                    video_processor=None
-                                )
+                            dotsocr_processor = Qwen2_5_VLProcessor(
+                                image_processor=image_processor,
+                                tokenizer=tokenizer,
+                                video_processor=None
+                            )
                             except (TypeError, ValueError):
                                 # Last resort: try to create processor by patching the class signature
                                 # Check if we can inspect the __init__ signature
@@ -1255,10 +1318,10 @@ def _init_dotsocr_model():
                                     dotsocr_processor.tokenizer = tokenizer
                                     if hasattr(dotsocr_processor, 'video_processor'):
                                         dotsocr_processor.video_processor = None
-                    except Exception as patch_error:
-                        DOTSOCR_AVAILABLE = False
+                        except Exception as patch_error:
+                            DOTSOCR_AVAILABLE = False
                         DOTSOCR_ERROR_MESSAGE = f"dots.ocr processor initialization failed with video_processor error. Manual patch failed. Original error: {error_str}, Patch error: {str(patch_error)}. Note: The gated repo fix is not accessible. Please ensure you have transformers >= 4.47.0 installed."
-                        raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
+                            raise RuntimeError(DOTSOCR_ERROR_MESSAGE)
                 elif "LlamaFlashAttention2" in error_str or "cannot import name" in error_str:
                     # If processor loading fails due to flash attention, it's likely a transformers version issue
                     DOTSOCR_AVAILABLE = False
@@ -1322,7 +1385,7 @@ def _init_dotsocr_model():
                                     if hasattr(Qwen2VLProcessor, '__init__'):
                                         try:
                                             Qwen2VLProcessor.__init__(dotsocr_processor, image_processor=image_processor, tokenizer=tokenizer)
-                                        except:
+                    except:
                                             dotsocr_processor.image_processor = image_processor
                                             dotsocr_processor.tokenizer = tokenizer
                                     else:
